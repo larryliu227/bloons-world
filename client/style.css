@@ -1,0 +1,232 @@
+/*
+ * BLOONS WORLD — styling.
+ *
+ * There is almost none, on purpose: the game is one canvas scaled by a whole number
+ * and everything else is a label floating over it.
+ */
+:root { --ink: #e2f0ff; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #0a0e14;
+  color: var(--ink);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  overflow: hidden;
+  overscroll-behavior: none;
+  user-select: none;
+}
+#app { position: fixed; inset: 0; display: grid; place-items: center; touch-action: none; }
+
+/* Never smooth the upscale — that is the whole of the pixel look. */
+.view { image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
+
+.hud, .status {
+  position: fixed;
+  padding: 4px 8px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  background: rgba(10, 14, 20, 0.72);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.hud { top: 8px; left: 8px; }
+.status { top: 8px; right: 8px; }
+.status[data-state="online"] { color: #7ee787; }
+.status[data-state="connecting"] { color: #ffd23d; }
+.status[data-state="offline"] { color: #ff7b72; }
+
+/* Floating thumbstick: appears wherever a thumb lands, vanishes on release. */
+.stick {
+  position: fixed;
+  width: 92px;
+  height: 92px;
+  margin: -46px 0 0 -46px;
+  border: 2px solid rgba(226, 240, 255, 0.25);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.stick.hidden { display: none; }
+.stick-nub {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  background: rgba(226, 240, 255, 0.35);
+  border-radius: 50%;
+}
+
+/* The name box. Bottom-left, out of the way, and obviously editable. */
+.namebox {
+  position: fixed;
+  left: 8px;
+  bottom: 8px;
+  width: 132px;
+  padding: 5px 8px;
+  background: rgba(10, 14, 20, 0.72);
+  color: var(--ink);
+  border: 1px solid rgba(226, 240, 255, 0.22);
+  border-radius: 2px;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+.namebox:focus { outline: none; border-color: #7ee787; }
+
+/* Jump, for thumbs. Bottom-right, opposite the stick, and big enough to hit. */
+.jump {
+  position: fixed;
+  right: 16px;
+  bottom: 24px;
+  width: 76px;
+  height: 76px;
+  background: rgba(226, 240, 255, 0.14);
+  color: var(--ink);
+  border: 2px solid rgba(226, 240, 255, 0.3);
+  border-radius: 50%;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  touch-action: none;
+}
+.jump:active { background: rgba(226, 240, 255, 0.3); }
+/* Keyboards have space; only show the button where there are no keys. */
+@media (hover: hover) and (pointer: fine) { .jump { display: none; } }
+
+/* Canvas and name tags share one box, so a label lines up with its sprite. */
+.stage { position: relative; }
+.tags { position: absolute; inset: 0; pointer-events: none; }
+
+/*
+ * A name tag. In the DOM rather than on the canvas: canvas text has to be drawn at
+ * world resolution (~5px) and upscaled with smoothing off, which turns every letter
+ * into mush. This stays sharp at any zoom.
+ */
+.tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: rgba(226, 240, 255, 0.92);
+  text-shadow: 0 1px 0 #0a0e14, 0 -1px 0 #0a0e14, 1px 0 0 #0a0e14, -1px 0 0 #0a0e14;
+}
+.tag.me { color: #ffffff; font-weight: 700; }
+
+/* ---------------------------------------------------------------- the title
+ *
+ * Opaque and full-screen rather than a panel over the world, because there is
+ * no world behind it yet — nothing is connected until ENTER WORLD is pressed.
+ */
+.menu {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #0a0e14;
+  /* Visibility flips only after the fade, so the finished screen is not still
+   * swallowing taps meant for the world underneath it. */
+  transition: opacity 220ms ease, visibility 0s linear 220ms;
+}
+.menu.gone {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.menu-card {
+  display: grid;
+  gap: 14px;
+  justify-items: center;
+  width: min(340px, 100%);
+  text-align: center;
+}
+
+.brand {
+  margin: 0;
+  font-size: clamp(24px, 8vw, 40px);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: #7ee787;
+}
+.tagline {
+  margin: 0 0 6px;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  color: rgba(226, 240, 255, 0.55);
+}
+
+.menu-name {
+  width: 100%;
+  padding: 11px 12px;
+  text-align: center;
+  background: rgba(226, 240, 255, 0.06);
+  color: var(--ink);
+  border: 1px solid rgba(226, 240, 255, 0.22);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 14px;
+  letter-spacing: 0.12em;
+}
+.menu-name:focus { outline: none; border-color: #7ee787; }
+.menu-name::placeholder { color: rgba(226, 240, 255, 0.3); }
+
+/* `user-select: none` on body keeps stray drags from selecting the page, but a
+ * text field is the one place selection has to work. */
+.menu-name, .namebox { user-select: text; -webkit-user-select: text; }
+
+.menu-go {
+  width: 100%;
+  padding: 14px;
+  background: #7ee787;
+  color: #0a0e14;
+  border: none;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  cursor: pointer;
+}
+.menu-go:active { transform: translateY(2px); }
+.menu-go:disabled {
+  background: rgba(226, 240, 255, 0.16);
+  color: rgba(226, 240, 255, 0.5);
+  cursor: default;
+  transform: none;
+}
+
+/* Always occupies a line, so the card does not jump when a status appears. */
+.menu-note {
+  margin: 0;
+  min-height: 1.2em;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: rgba(226, 240, 255, 0.6);
+}
+.menu-note[data-state="online"] { color: #7ee787; }
+.menu-note[data-state="connecting"] { color: #ffd23d; }
+.menu-note[data-state="offline"] { color: #ff7b72; }
+
+.menu-keys {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.7;
+  letter-spacing: 0.06em;
+  color: rgba(226, 240, 255, 0.35);
+}
+.menu-keys p { margin: 0; }
+
+/* The in-world chrome is built up front but has nothing to say until you are in
+ * the world. Hidden rather than unmounted so entering is one class change, not
+ * a rebuild of the page. */
+#app.title .hud,
+#app.title .status,
+#app.title .namebox,
+#app.title .jump,
+#app.title .stage { visibility: hidden; }

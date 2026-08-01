@@ -1,0 +1,41 @@
+# BLOONS WORLD — Render Blueprint.
+#
+#   1. Push this repo to GitHub.
+#   2. Render dashboard -> New -> Blueprint -> pick the repo.
+#   3. Apply. Render reads this file, builds the Dockerfile and gives you an
+#      https:// URL. WebSockets are supported on every plan, including free.
+#
+# Render terminates TLS and proxies to $PORT inside the container, so the page
+# is served over https:// and the client's origin-derived socket becomes wss://
+# automatically. Nothing to configure.
+#
+# ---------------------------------------------------------------------------
+# Keep numInstances at 1. There is one world and it lives in this process's
+# memory. A second instance is a second, invisible world — two people who
+# opened the same link would not see each other, with nothing on screen to
+# explain why. Render's load balancer has no sticky sessions, so there is no
+# way to scale this out without moving the world off the process first.
+# ---------------------------------------------------------------------------
+
+services:
+  - type: web
+    name: bloons-world
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Free: no card needed. Instances sleep after ~15 min idle and cold-start in
+    # a couple of minutes — the first person to open the link wakes it. Nobody's
+    # position survives a sleep, but nothing is meant to: you walk back.
+    plan: free
+    region: oregon # frankfurt / singapore / ohio / virginia also available
+    numInstances: 1
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render injects PORT and expects the process to bind it. The server reads
+      # process.env.PORT, so this is really just documentation — but pinning it
+      # keeps the Dockerfile's EXPOSE, the healthcheck and Render in agreement.
+      - key: PORT
+        value: "8080"
