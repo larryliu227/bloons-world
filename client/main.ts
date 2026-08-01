@@ -13,10 +13,17 @@
  *    INTERP_DELAY_MS in the past so there is always a pair to interpolate between.
  *    Drawing them at the newest position instead means stuttering on every late
  *    packet.
+ *
+ * It also owns which VIEW you are in. First person is a camera and a control
+ * mapping and nothing more: `worldMove` folds "forward and to my right" back into
+ * the same world-space vector the top-down view sends, so both views produce
+ * identical traffic and the netcode above never learns there are two of them.
  */
 
 import { INPUT_RATE, INTERP_DELAY_MS, clampToWorld, step } from '../shared/world.js';
 import type { Player } from '../shared/world.js';
+import { EYE_H, yawOf } from './fp.js';
+import type { Eye } from './fp.js';
 import { Input } from './input.js';
 import { Menu } from './menu.js';
 import { Net } from './net.js';
@@ -134,13 +141,31 @@ let lastFrame = performance.now();
 /** A jump waiting for the next input frame, and one for the local prediction. */
 let jumpPending = false;
 let predictJump = false;
+/**
+ * Whether you are standing in the world or looking down at it.
+ *
+ * This is a CLIENT choice and nothing else knows about it. The controls are mapped
+ * back into the same world-space vector before anything is sent, so the server, the
+ * protocol and everybody else's screen cannot tell the two apart — which is what
+ * keeps a second view from being a second game to keep in sync.
+ */
+let firstPerson = false;
 
 function loop(now: number): void {
   requestAnimationFrame(loop);
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
+  input.update(dt);
 
-  const v = input.vector();
+  if (input.takeViewToggle()) {
+    firstPerson = !firstPerson;
+    // Arrive facing the way you were already facing. Being spun to face east on
+    // the way in costs a second of "which way am I pointed" every single time.
+    if (firstPerson) input.yaw = yawOf(me.dir);
+    input.setFirstPerson(firstPerson);
+  }
+
+  const v = firstPerson ? worldMove(input.moveLocal(), input.yaw) : input.vector();
   // Latched here rather than read inside the timed block below: a jump pressed
   // between two input frames would otherwise be thrown away.
   if (input.takeJump()) {
@@ -207,8 +232,47 @@ function loop(now: number): void {
 
   // Nothing to draw behind the title, and the title is opaque — so do not.
   if (!entered) return;
-  renderer.draw(worldNow(now), net.id, now / 1000);
+  renderer.draw(worldNow(now), net.id, now / 1000, eyeNow(now / 1000));
   hud.textContent = `${net.last?.players.length ?? 0} here`;
+}
+
+/** The camera for the first-person view, or null to look down at the world. */
+function eyeNow(time: number): Eye | null {
+  if (!firstPerson || !seeded) return null;
+  return {
+    x: me.x,
+    y: me.y,
+    yaw: input.yaw,
+    pitch: input.pitch,
+    // A jump lifts the camera exactly as much as it lifts your sprite on everybody
+    // else's screen, so the two views agree about how high two-thirds of a second
+    // gets you.
+    height: EYE_H + me.z + bob(time),
+  };
+}
+
+/**
+ * A little under a pixel of head movement per footfall.
+ *
+ * The ground is flat and quiet enough that walking across it can read as gliding.
+ * 5 Hz is the rate the legs already swap at, so the bob lands on the steps rather
+ * than beside them, and 0.8 world pixels is small enough to be felt rather than
+ * watched. Nothing bobs in the air — you are not taking steps up there.
+ */
+function bob(time: number): number {
+  if (!me.moving || me.z > 0.5) return 0;
+  return Math.sin(time * Math.PI * 10) * 0.8;
+}
+
+/**
+ * Turn "forward, and to my right" into "north-east", which is the only thing the
+ * wire carries. Your right is a quarter turn clockwise on the map, because the
+ * world's y axis points down the screen.
+ */
+function worldMove(m: { fwd: number; strafe: number }, yaw: number): { x: number; y: number } {
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  return { x: m.fwd * c - m.strafe * s, y: m.fwd * s + m.strafe * c };
 }
 
 /**

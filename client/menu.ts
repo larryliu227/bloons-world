@@ -65,6 +65,7 @@ export class Menu {
     const keys = document.createElement('div');
     keys.className = 'menu-keys';
     keys.appendChild(text('p', '', 'WASD or ARROWS to walk · SPACE to jump'));
+    keys.appendChild(text('p', '', 'V to stand in it · MOUSE to look'));
     keys.appendChild(text('p', '', 'On a phone, press anywhere to steer'));
     card.appendChild(keys);
 

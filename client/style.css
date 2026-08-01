@@ -92,8 +92,29 @@ html, body {
   touch-action: none;
 }
 .jump:active { background: rgba(226, 240, 255, 0.3); }
-/* Keyboards have space; only show the button where there are no keys. */
-@media (hover: hover) and (pointer: fine) { .jump { display: none; } }
+
+/* The view switch, above JUMP so a thumb reaches both without moving hands. */
+.view-btn {
+  position: fixed;
+  right: 30px;
+  bottom: 110px;
+  width: 48px;
+  height: 48px;
+  background: rgba(226, 240, 255, 0.1);
+  color: var(--ink);
+  border: 2px solid rgba(226, 240, 255, 0.24);
+  border-radius: 50%;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  touch-action: none;
+}
+.view-btn:active { background: rgba(226, 240, 255, 0.28); }
+
+/* Keyboards have space and V; only show the buttons where there are no keys. */
+@media (hover: hover) and (pointer: fine) {
+  .jump, .view-btn { display: none; }
+}
 
 /* Canvas and name tags share one box, so a label lines up with its sprite. */
 .stage { position: relative; }
@@ -229,4 +250,5 @@ html, body {
 #app.title .status,
 #app.title .namebox,
 #app.title .jump,
+#app.title .view-btn,
 #app.title .stage { visibility: hidden; }

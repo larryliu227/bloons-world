@@ -1,15 +1,23 @@
 /**
  * BLOONS WORLD — the renderer.
  *
- * Everything is drawn procedurally out of rectangles at 1x and then scaled up with
- * smoothing off, which is what actually makes something look like pixel art: there
- * are no assets to load and no half-pixels anywhere. The camera rounds to whole
- * world pixels for the same reason — a fractional camera makes every straight edge
- * shimmer as you walk.
+ * Owns the one canvas, the one set of name labels, and the scale everything is drawn
+ * at. What it draws INTO that canvas is either of two views:
+ *
+ *  - from above, here — rectangles at 1x scaled up by a whole number with smoothing
+ *    off, which is what actually makes something look like pixel art;
+ *  - from eye level, in `fp.ts`, when `draw` is handed an `Eye`.
+ *
+ * Both are the same world at the same instant out of the same art. The camera rounds
+ * to whole world pixels for the same reason the scale is an integer — a fractional
+ * camera makes every straight edge shimmer as you walk.
  */
 
-import { BODY_H, BODY_W, TILE, WORLD_H, WORLD_PX_H, WORLD_PX_W, WORLD_W } from '../shared/world.js';
-import type { Dir, Player } from '../shared/world.js';
+import { BODY_H, BODY_W, WORLD_PX_H, WORLD_PX_W } from '../shared/world.js';
+import type { Player } from '../shared/world.js';
+import { groundCanvas, paintPerson, walkFrame } from './art.js';
+import { FirstPerson } from './fp.js';
+import type { Eye, TagSpot } from './fp.js';
 
 /** How many world pixels tall the viewport is. Everything scales off this. */
 const VIEW_H = 176;
@@ -25,8 +33,10 @@ export class Renderer {
   private vw = 240;
   private vh = VIEW_H;
   private scale = 3;
-  /** The ground, drawn once into an offscreen canvas and then blitted. */
+  /** The ground, baked once and shared with the first-person view. */
   private ground: HTMLCanvasElement;
+  /** Built the first time somebody actually looks through it. */
+  private fp: FirstPerson | null = null;
 
   constructor() {
     this.el = document.createElement('div');
@@ -48,7 +58,7 @@ export class Renderer {
     const ctx = this.canvas.getContext('2d', { alpha: false });
     if (!ctx) throw new Error('canvas 2d unavailable');
     this.ctx = ctx;
-    this.ground = buildGround();
+    this.ground = groundCanvas();
     this.resize();
   }
 
@@ -70,7 +80,25 @@ export class Renderer {
     this.ctx.imageSmoothingEnabled = false;
   }
 
-  draw(players: Player[], meId: string, time: number): void {
+  /**
+   * One frame. Pass an `Eye` to stand in the world, or null to look down at it.
+   *
+   * Either way the labels are placed the same afterwards: the view says where each
+   * name landed on the canvas and this puts a crisp div there.
+   */
+  draw(players: Player[], meId: string, time: number, eye: Eye | null): void {
+    let spots: TagSpot[];
+    if (eye) {
+      if (!this.fp) this.fp = new FirstPerson();
+      spots = this.fp.draw(this.ctx, this.vw, this.vh, eye, players, meId, time);
+    } else {
+      spots = this.drawFromAbove(players, meId, time);
+    }
+    this.placeTags(spots, players, meId);
+  }
+
+  /** The top-down view: ground blit, then everybody, back to front. */
+  private drawFromAbove(players: Player[], meId: string, time: number): TagSpot[] {
     const me = players.find((p) => p.id === meId);
     const ctx = this.ctx;
 
@@ -82,17 +110,22 @@ export class Renderer {
     ctx.fillRect(0, 0, this.vw, this.vh);
     ctx.drawImage(this.ground, -camX, -camY);
 
+    const spots: TagSpot[] = [];
     // Painter's algorithm: whoever is further down the screen is in front.
     for (const p of [...players].sort((a, b) => a.y - b.y)) {
       this.drawPerson(p, p.x - camX, p.y - camY, time, p.id === meId);
+      // Follows the sprite up when they jump, so the tag stays over their head.
+      spots.push({ id: p.id, x: p.x - camX, y: p.y - camY - BODY_H - p.z - 3 });
     }
-    this.drawTags(players, camX, camY, meId);
+    return spots;
   }
 
-  /** Position one crisp label per player, and retire the ones who left. */
-  private drawTags(players: Player[], camX: number, camY: number, meId: string): void {
+  /** Position one crisp label per spot, and retire the ones who left or dropped out. */
+  private placeTags(spots: TagSpot[], players: Player[], meId: string): void {
     const alive = new Set<string>();
-    for (const p of players) {
+    for (const spot of spots) {
+      const p = players.find((q) => q.id === spot.id);
+      if (!p) continue;
       alive.add(p.id);
       let tag = this.tags.get(p.id);
       if (!tag) {
@@ -103,9 +136,8 @@ export class Renderer {
       }
       if (tag.textContent !== p.name) tag.textContent = p.name;
       tag.classList.toggle('me', p.id === meId);
-      // Follows the sprite up when they jump, so the tag stays over their head.
-      const sx = (p.x - camX) * this.scale;
-      const sy = (p.y - camY - BODY_H - p.z - 3) * this.scale;
+      const sx = spot.x * this.scale;
+      const sy = spot.y * this.scale;
       tag.style.transform = `translate(${Math.round(sx)}px, ${Math.round(sy)}px) translateX(-50%)`;
       // Cheap cull: a label parked far off-screen still costs layout.
       tag.style.display = sx < -80 || sy < -40 || sx > this.vw * this.scale + 80 ? 'none' : '';
@@ -118,8 +150,9 @@ export class Renderer {
   }
 
   /**
-   * One person: a 10x12 body with a two-frame walk. The whole sprite is rectangles,
-   * so the "art" is a dozen fillRect calls and there is nothing to load.
+   * One person from above: a 10x12 body with a two-frame walk, plus the two things
+   * that only make sense looking down — the shadow they cast and the ring that says
+   * which one is you.
    */
   private drawPerson(p: Player, sx: number, sy: number, time: number, isMe: boolean): void {
     const ctx = this.ctx;
@@ -133,10 +166,6 @@ export class Renderer {
     const y = Math.round(sy - BODY_H - p.z);
     if (x < -32 || y < -48 || x > this.vw + 32 || y > this.vh + 48) return;
 
-    const body = `hsl(${p.hue} 62% 56%)`;
-    const dark = `hsl(${p.hue} 55% 38%)`;
-    const skin = '#f0c9a0';
-
     /*
      * The shadow stays on the ground and shrinks with height. It is the only cue
      * for how high somebody is — without it a jump is indistinguishable from
@@ -147,24 +176,7 @@ export class Renderer {
     ctx.fillStyle = `rgba(0,0,0,${0.28 - lift * 0.14})`;
     ctx.fillRect(x + 1 + Math.round((BODY_W - 2 - shW) / 2), groundY - 1, shW, 2);
 
-    // The walk cycle: legs swap on a 5 Hz square wave while moving, feet together
-    // when stopped. Two frames is all a 12-pixel person needs.
-    // Airborne: legs tuck together instead of walking. A running-man in mid-air
-    // reads as a bug, and it is one line to not do it.
-    const frame = p.z > 0.5 ? 0 : p.moving ? (Math.floor(time * 5) % 2 === 0 ? 1 : -1) : 0;
-    ctx.fillStyle = dark;
-    ctx.fillRect(x + 2, y + 9 + (frame > 0 ? 1 : 0), 2, 3);
-    ctx.fillRect(x + BODY_W - 4, y + 9 + (frame < 0 ? 1 : 0), 2, 3);
-
-    ctx.fillStyle = body;
-    ctx.fillRect(x + 1, y + 4, BODY_W - 2, 6);
-    ctx.fillStyle = skin;
-    ctx.fillRect(x + 2, y, BODY_W - 4, 5);
-    // Hair, so `up` reads as a back of a head rather than a blank face.
-    ctx.fillStyle = dark;
-    ctx.fillRect(x + 2, y, BODY_W - 4, 2);
-
-    this.drawFace(x, y, p.dir);
+    paintPerson(ctx, x, y, p.hue, p.dir, walkFrame(p, time));
 
     if (isMe) {
       // A ring under your own feet — with everybody the same size and shape, this is
@@ -175,59 +187,8 @@ export class Renderer {
       ctx.strokeRect(x - 1.5, groundY - 2.5, BODY_W + 2, 4);
     }
 
-    // The name itself is a DOM label — see `drawTags`.
+    // The name itself is a DOM label — see `placeTags`.
   }
-
-  private drawFace(x: number, y: number, dir: Dir): void {
-    const ctx = this.ctx;
-    ctx.fillStyle = '#1b2430';
-    if (dir === 'up') return; // back of the head — no eyes
-    if (dir === 'down') {
-      ctx.fillRect(x + 3, y + 3, 1, 1);
-      ctx.fillRect(x + BODY_W - 4, y + 3, 1, 1);
-      return;
-    }
-    // Facing sideways: one eye, pushed to the side you are looking.
-    ctx.fillRect(dir === 'right' ? x + BODY_W - 4 : x + 3, y + 3, 1, 1);
-  }
-}
-
-/**
- * The ground, baked once.
- *
- * Redrawing four thousand tiles every frame is pointless when none of them ever
- * change — bake it into an offscreen canvas at world size and blit the visible part.
- */
-function buildGround(): HTMLCanvasElement {
-  const c = document.createElement('canvas');
-  c.width = WORLD_PX_W;
-  c.height = WORLD_PX_H;
-  const g = c.getContext('2d')!;
-  for (let ty = 0; ty < WORLD_H; ty++) {
-    for (let tx = 0; tx < WORLD_W; tx++) {
-      // Cheap deterministic hash so the grass has variety but never flickers.
-      const h = ((tx * 73856093) ^ (ty * 19349663)) >>> 0;
-      const shade = 26 + (h % 5) * 3;
-      g.fillStyle = `hsl(${104 + (h % 7)} 26% ${shade}%)`;
-      g.fillRect(tx * TILE, ty * TILE, TILE, TILE);
-      // A few blades, so walking across it reads as movement.
-      if (h % 11 === 0) {
-        g.fillStyle = `hsl(96 30% ${shade + 8}%)`;
-        g.fillRect(tx * TILE + (h % 12), ty * TILE + ((h >> 4) % 12), 1, 2);
-      }
-      if (h % 37 === 0) {
-        g.fillStyle = `hsl(30 22% ${shade + 4}%)`;
-        g.fillRect(tx * TILE + ((h >> 8) % 10) + 2, ty * TILE + ((h >> 12) % 10) + 2, 2, 2);
-      }
-    }
-  }
-  // A border so the edge of the world is visible rather than an invisible wall.
-  g.fillStyle = '#243044';
-  g.fillRect(0, 0, WORLD_PX_W, 2);
-  g.fillRect(0, WORLD_PX_H - 2, WORLD_PX_W, 2);
-  g.fillRect(0, 0, 2, WORLD_PX_H);
-  g.fillRect(WORLD_PX_W - 2, 0, 2, WORLD_PX_H);
-  return c;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
