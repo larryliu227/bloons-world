@@ -3,12 +3,27 @@
  *
  * There is almost none, on purpose: the game is one canvas scaled by a whole number
  * and everything else is a label floating over it.
+ *
+ * The floating things all measure from the same four variables rather than from the
+ * window, because on a phone the window is not where the screen is: a notch eats the
+ * top and a home indicator eats the bottom, and a JUMP button under the latter is a
+ * JUMP button that swipes you out of the game.
  */
-:root { --ink: #e2f0ff; }
+:root {
+  --ink: #e2f0ff;
+  --panel: rgba(10, 14, 20, 0.72);
+  --pad-t: max(8px, env(safe-area-inset-top));
+  --pad-b: max(8px, env(safe-area-inset-bottom));
+  --pad-l: max(8px, env(safe-area-inset-left));
+  --pad-r: max(8px, env(safe-area-inset-right));
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body {
   margin: 0;
   height: 100%;
+  /* dvh follows the browser chrome as it slides away; vh does not, and the gap is
+   * exactly the strip a phone hides the address bar in. */
+  height: 100dvh;
   background: #0a0e14;
   color: var(--ink);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -16,25 +31,101 @@ html, body {
   overscroll-behavior: none;
   user-select: none;
 }
-#app { position: fixed; inset: 0; display: grid; place-items: center; touch-action: none; }
+#app {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  touch-action: none;
+}
 
+/*
+ * The stage is exactly the visible viewport and it CLIPS. The canvas inside it is
+ * one world pixel bigger and slides around under that clip by a fraction of a pixel
+ * — see the comment at the top of render.ts. Without the clip, the slide would show
+ * an empty edge on two sides.
+ */
+.stage { position: relative; overflow: hidden; }
 /* Never smooth the upscale — that is the whole of the pixel look. */
-.view { image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
+.view {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  /* It is transformed every frame; say so, so it gets its own layer instead of
+   * repainting the page under it. */
+  will-change: transform;
+}
+.tags { position: absolute; inset: 0; pointer-events: none; }
+
+/*
+ * A name tag. In the DOM rather than on the canvas: canvas text has to be drawn at
+ * world resolution (~5px) and upscaled with smoothing off, which turns every letter
+ * into mush. This stays sharp at any zoom.
+ */
+.tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: rgba(226, 240, 255, 0.92);
+  text-shadow: 0 1px 0 #0a0e14, 0 -1px 0 #0a0e14, 1px 0 0 #0a0e14, -1px 0 0 #0a0e14;
+}
+.tag.me { color: #ffffff; font-weight: 700; }
+
+/* ------------------------------------------------------------------ the corners */
 
 .hud, .status {
   position: fixed;
   padding: 4px 8px;
   font-size: 12px;
   letter-spacing: 0.08em;
-  background: rgba(10, 14, 20, 0.72);
+  background: var(--panel);
   border-radius: 2px;
   pointer-events: none;
 }
-.hud { top: 8px; left: 8px; }
-.status { top: 8px; right: 8px; }
+.hud { top: calc(var(--pad-t) + 26px); left: var(--pad-l); }
+.status { top: var(--pad-t); right: calc(var(--pad-r) + 40px); }
 .status[data-state="online"] { color: #7ee787; }
 .status[data-state="connecting"] { color: #ffd23d; }
 .status[data-state="offline"] { color: #ff7b72; }
+
+/*
+ * Ten pips rather than a bar that fills. At this size the last tenth of a continuous
+ * bar disappears into rounding, and the question anybody asks of it is "how many
+ * have I got left", which is a counting question.
+ */
+.health {
+  position: fixed;
+  top: var(--pad-t);
+  left: var(--pad-l);
+  display: flex;
+  gap: 3px;
+  padding: 5px 6px;
+  background: var(--panel);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.health i {
+  width: 7px;
+  height: 12px;
+  border-radius: 1px;
+  background: rgba(226, 240, 255, 0.14);
+  transition: background 140ms linear;
+}
+.health i.on { background: #ff5d55; box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.28); }
+.health.low i.on { animation: pulse 780ms ease-in-out infinite; }
+@keyframes pulse {
+  50% { background: #ffb3ae; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .health.low i.on { animation: none; }
+}
 
 /* Floating thumbstick: appears wherever a thumb lands, vanishes on release. */
 .stick {
@@ -61,11 +152,11 @@ html, body {
 /* The name box. Bottom-left, out of the way, and obviously editable. */
 .namebox {
   position: fixed;
-  left: 8px;
-  bottom: 8px;
-  width: 132px;
+  left: var(--pad-l);
+  bottom: var(--pad-b);
+  width: min(132px, 38vw);
   padding: 5px 8px;
-  background: rgba(10, 14, 20, 0.72);
+  background: var(--panel);
   color: var(--ink);
   border: 1px solid rgba(226, 240, 255, 0.22);
   border-radius: 2px;
@@ -75,67 +166,131 @@ html, body {
 }
 .namebox:focus { outline: none; border-color: #7ee787; }
 
-/* Jump, for thumbs. Bottom-right, opposite the stick, and big enough to hit. */
-.jump {
+/* ----------------------------------------------------------------- the buttons */
+
+.jump, .view-btn, .help-btn {
   position: fixed;
-  right: 16px;
-  bottom: 24px;
-  width: 76px;
-  height: 76px;
-  background: rgba(226, 240, 255, 0.14);
+  background: rgba(226, 240, 255, 0.12);
   color: var(--ink);
-  border: 2px solid rgba(226, 240, 255, 0.3);
+  border: 2px solid rgba(226, 240, 255, 0.28);
   border-radius: 50%;
   font: inherit;
-  font-size: 12px;
   letter-spacing: 0.1em;
   touch-action: none;
+  cursor: pointer;
 }
-.jump:active { background: rgba(226, 240, 255, 0.3); }
+.jump:active, .view-btn:active, .help-btn:active { background: rgba(226, 240, 255, 0.32); }
 
+/* Jump, for thumbs. Bottom-right, opposite the stick, and big enough to hit. */
+.jump {
+  right: calc(var(--pad-r) + 8px);
+  bottom: calc(var(--pad-b) + 16px);
+  width: 76px;
+  height: 76px;
+  font-size: 12px;
+}
 /* The view switch, above JUMP so a thumb reaches both without moving hands. */
 .view-btn {
-  position: fixed;
-  right: 30px;
-  bottom: 110px;
+  right: calc(var(--pad-r) + 22px);
+  bottom: calc(var(--pad-b) + 102px);
   width: 48px;
   height: 48px;
-  background: rgba(226, 240, 255, 0.1);
-  color: var(--ink);
-  border: 2px solid rgba(226, 240, 255, 0.24);
-  border-radius: 50%;
-  font: inherit;
   font-size: 10px;
-  letter-spacing: 0.08em;
-  touch-action: none;
 }
-.view-btn:active { background: rgba(226, 240, 255, 0.28); }
-
-/* Keyboards have space and V; only show the buttons where there are no keys. */
+/* Keyboards have space and V; only show those two where there are no keys. */
 @media (hover: hover) and (pointer: fine) {
   .jump, .view-btn { display: none; }
 }
 
-/* Canvas and name tags share one box, so a label lines up with its sprite. */
-.stage { position: relative; }
-.tags { position: absolute; inset: 0; pointer-events: none; }
-
-/*
- * A name tag. In the DOM rather than on the canvas: canvas text has to be drawn at
- * world resolution (~5px) and upscaled with smoothing off, which turns every letter
- * into mush. This stays sharp at any zoom.
- */
-.tag {
-  position: absolute;
-  left: 0;
-  top: 0;
-  white-space: nowrap;
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  color: rgba(226, 240, 255, 0.92);
-  text-shadow: 0 1px 0 #0a0e14, 0 -1px 0 #0a0e14, 1px 0 0 #0a0e14, -1px 0 0 #0a0e14;
+/* The controls list is wanted on every device, so this one never hides. */
+.help-btn {
+  top: var(--pad-t);
+  right: var(--pad-r);
+  width: 32px;
+  height: 32px;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0;
 }
-.tag.me { color: #ffffff; font-weight: 700; }
+.help-btn.open { background: #7ee787; color: #0a0e14; border-color: #7ee787; }
+
+/* ------------------------------------------------------------ what you can do */
+
+.help {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: calc(var(--pad-t) + 4px) var(--pad-r) calc(var(--pad-b) + 4px) var(--pad-l);
+  background: rgba(6, 9, 14, 0.82);
+}
+.help[hidden] { display: none; }
+.help-card {
+  width: min(520px, 100%);
+  /* Taller than the screen on a phone in landscape, so it scrolls rather than
+   * spilling its last section off the bottom where nobody will find it. */
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 16px 18px 18px;
+  background: #0d131c;
+  border: 1px solid rgba(226, 240, 255, 0.18);
+  border-radius: 4px;
+}
+.help-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.help-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: #7ee787;
+}
+.help-close {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  background: none;
+  color: rgba(226, 240, 255, 0.6);
+  border: none;
+  font: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.help-close:hover { color: var(--ink); }
+
+.help section { margin-top: 15px; }
+.help h3 {
+  margin: 0 0 6px;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  color: rgba(226, 240, 255, 0.4);
+}
+.help dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(84px, max-content) 1fr;
+  gap: 4px 14px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.help dt { color: #ffd23d; white-space: nowrap; }
+.help dd { margin: 0; color: rgba(226, 240, 255, 0.82); }
+/* On a narrow phone the two columns cannot both fit, so they stack. */
+@media (max-width: 400px) {
+  .help dl { grid-template-columns: 1fr; gap: 0 0; }
+  .help dd { margin: 0 0 7px; }
+}
+.help-foot {
+  margin: 16px 0 0;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: rgba(226, 240, 255, 0.35);
+}
+/* A quiet marker on whichever view you are actually in. */
+.help.in-world section[data-view="fp"] h3,
+.help:not(.in-world) section[data-view="top"] h3 { color: #7ee787; }
 
 /* ---------------------------------------------------------------- the title
  *
@@ -148,7 +303,8 @@ html, body {
   z-index: 10;
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: calc(var(--pad-t) + 16px) 24px calc(var(--pad-b) + 16px);
+  overflow-y: auto;
   background: #0a0e14;
   /* Visibility flips only after the fade, so the finished screen is not still
    * swallowing taps meant for the world underneath it. */
@@ -248,6 +404,7 @@ html, body {
  * a rebuild of the page. */
 #app.title .hud,
 #app.title .status,
+#app.title .health,
 #app.title .namebox,
 #app.title .jump,
 #app.title .view-btn,

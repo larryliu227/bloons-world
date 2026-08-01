@@ -11,20 +11,31 @@
  *  - The FLOOR is cast, not projected. Every screen row below the horizon is a fixed
  *    distance away, so one divide gives that distance and then the world position
  *    steps linearly across the row — the whole ground is a texture read per pixel
- *    with no geometry at all. It samples `groundPixels()`, so the grass underfoot is
- *    literally the grass the top-down view blits.
+ *    with no geometry at all. It samples `groundPixels()`, so the grass, the sand
+ *    and the water underfoot are literally what the top-down view blits.
  *  - The WALL around the world is four line segments and the camera is always inside
  *    them, so a column's wall distance is one slab test — no DDA, no grid march.
- *  - PEOPLE are billboards. Nothing can hide behind the wall (everyone is inside it,
- *    always), so drawing them far-to-near is the entire depth test. No z-buffer.
+ *  - TREES AND PEOPLE are billboards. Nothing can hide behind the wall (everything
+ *    is inside it, always), so drawing them far-to-near is the entire depth test.
+ *    No z-buffer.
  *
  * Sky and fog are the same colour on purpose. The ground fades into exactly what is
  * above the horizon, so the far edge of the world dissolves instead of ending.
  */
 
-import { BODY_H, BODY_W, WORLD_PX_H, WORLD_PX_W } from '../shared/world.js';
-import type { Dir, Player } from '../shared/world.js';
-import { EDGE_RGB, groundPixels, pack, paintPerson, walkFrame } from './art.js';
+import { BODY_H, BODY_W, WORLD_PX_H, WORLD_PX_W, trees } from '../shared/world.js';
+import type { Dir, Player, Tree } from '../shared/world.js';
+import {
+  EDGE_RGB,
+  TREE_H,
+  TREE_W,
+  groundPixels,
+  pack,
+  paintPerson,
+  treeSprites,
+  treeVariant,
+  walkFrame,
+} from './art.js';
 
 /** Horizontal field of view. Wide enough not to feel like a periscope. */
 const FOV = (74 * Math.PI) / 180;
@@ -41,7 +52,7 @@ export const EYE_H = 10;
  * starts to read as a fisheye, and you can also lose the ground entirely — hence a
  * clamp rather than a free axis.
  */
-export const PITCH_LIMIT = 96;
+export const PITCH_LIMIT = 110;
 
 /**
  * The wall around the world, in world pixels.
@@ -56,13 +67,29 @@ const WALL_H = 26;
 const FOG_NEAR = 96;
 const FOG_FAR = 640;
 
-const SKY_TOP = { r: 12, g: 18, b: 32 };
+/**
+ * Daylight. The sky is deep overhead and pale at the horizon, and the pale end is
+ * also the fog, so distance washes things OUT rather than dimming them — which is
+ * what haze actually does, and the only version of it that agrees with there being
+ * a sun up there.
+ */
+const SKY_TOP = { r: 34, g: 62, b: 112 };
 /** Also the fog colour — see the file comment. */
-const HAZE = { r: 58, g: 78, b: 104 };
+const HAZE = { r: 146, g: 172, b: 196 };
 const HAZE_PACKED = pack(HAZE.r, HAZE.g, HAZE.b);
+
+/** Where the sun sits, as a compass bearing, and how far above the horizon. */
+const SUN_YAW = -1.15;
+const SUN_UP = 56;
+const SUN_R = 9;
+const SUN_GLOW = 46;
+const SUN_RGB = { r: 255, g: 232, b: 176 };
 
 /** The sprite is one pixel taller than the body: the forward leg hangs below. */
 const SPRITE_H = BODY_H + 1;
+
+/** How many pre-tinted copies of each tree to keep. See `fadedTree`. */
+const FOG_STEPS = 8;
 
 /** Where you are and where you are looking. Built by `main` every frame. */
 export interface Eye {
@@ -84,6 +111,14 @@ export interface TagSpot {
   y: number;
 }
 
+/** One thing standing in the world, already transformed into camera space. */
+interface Billboard {
+  depth: number;
+  screenX: number;
+  player: Player | null;
+  tree: Tree | null;
+}
+
 export class FirstPerson {
   private img: ImageData | null = null;
   private buf = new Uint32Array(0);
@@ -92,6 +127,8 @@ export class FirstPerson {
   /** One person is painted here at 1x, then blitted scaled. */
   private scratch: HTMLCanvasElement;
   private sctx: CanvasRenderingContext2D;
+  /** Reused every frame so a forest is not two hundred fresh objects a frame. */
+  private seen: Billboard[] = [];
 
   constructor() {
     this.scratch = document.createElement('canvas');
@@ -139,16 +176,18 @@ export class FirstPerson {
     const focal = vw / (2 * PLANE);
     const horizon = vh / 2 + eye.pitch;
 
-    this.paintSky(vw, vh, horizon);
+    this.paintSky(vw, vh, horizon, focal, eye.yaw);
     this.paintFloor(vw, vh, horizon, focal, eye, dirX, dirY, planeX, planeY);
     this.paintWalls(vw, vh, horizon, focal, eye, dirX, dirY, planeX, planeY);
     ctx.putImageData(this.img, 0, 0);
 
-    return this.paintPeople(ctx, vw, vh, horizon, focal, eye, players, meId, time, dirX, dirY, planeX, planeY, rightX, rightY);
+    return this.paintStanding(
+      ctx, vw, vh, horizon, focal, eye, players, meId, time, dirX, dirY, planeX, planeY, rightX, rightY,
+    );
   }
 
-  /** A gradient, darkest overhead. Nothing is up there yet. */
-  private paintSky(vw: number, vh: number, horizon: number): void {
+  /** A gradient, darkest overhead, with the sun wherever you are not looking. */
+  private paintSky(vw: number, vh: number, horizon: number, focal: number, yaw: number): void {
     const end = Math.min(vh, Math.max(0, Math.ceil(horizon)));
     for (let y = 0; y < end; y++) {
       // Squared, so the haze hugs the horizon instead of washing out the whole sky.
@@ -159,6 +198,42 @@ export class FirstPerson {
         (SKY_TOP.b + (HAZE.b - SKY_TOP.b) * t) | 0,
       );
       this.buf.fill(c, y * vw, y * vw + vw);
+    }
+
+    /*
+     * The sun. It is the one fixed thing in a world with no landmarks — a field of
+     * grass looks the same in all four directions, and without something in the sky
+     * to steer by, turning around in first person loses you completely.
+     *
+     * Painted into the sky buffer rather than over the finished frame, so the wall
+     * covers it when it has set behind one.
+     */
+    const delta = wrapAngle(SUN_YAW - yaw);
+    if (Math.abs(delta) > 1.3) return;
+    const cx = vw / 2 + Math.tan(delta) * focal;
+    const cy = horizon - SUN_UP;
+    const x0 = Math.max(0, Math.floor(cx - SUN_GLOW));
+    const x1 = Math.min(vw, Math.ceil(cx + SUN_GLOW));
+    const y0 = Math.max(0, Math.floor(cy - SUN_GLOW));
+    const y1 = Math.min(Math.min(vh, end), Math.ceil(cy + SUN_GLOW));
+    for (let y = y0; y < y1; y++) {
+      const dy = y + 0.5 - cy;
+      for (let x = x0; x < x1; x++) {
+        const dx = x + 0.5 - cx;
+        const d = Math.hypot(dx, dy);
+        if (d > SUN_GLOW) continue;
+        // Solid in the middle, and a glow that falls off fast enough to stay a sun
+        // rather than a smear across a quarter of the sky.
+        const a = d <= SUN_R ? 1 : (1 - (d - SUN_R) / (SUN_GLOW - SUN_R)) ** 3 * 0.55;
+        const i = y * vw + x;
+        const c = this.buf[i];
+        this.buf[i] =
+          ((255 << 24) |
+            ((((c >>> 16) & 255) * (1 - a) + SUN_RGB.b * a) << 16) |
+            ((((c >>> 8) & 255) * (1 - a) + SUN_RGB.g * a) << 8) |
+            ((c & 255) * (1 - a) + SUN_RGB.r * a)) >>>
+          0;
+      }
     }
   }
 
@@ -311,13 +386,14 @@ export class FirstPerson {
   }
 
   /**
-   * Everybody else, as billboards.
+   * Everything standing on the ground — trees and people — as billboards.
    *
-   * Each person is painted once at 1x into the scratch canvas and blitted scaled with
-   * smoothing off, so a person twenty tiles away is the same sprite as one in your
-   * face, just fewer pixels of it — which is the whole pixel-art look, kept.
+   * Each is blitted from a sprite that was rasterised once at 1x, so a tree twenty
+   * tiles away is the same tree as one in your face, just fewer pixels of it, which
+   * is the whole pixel-art look kept. They go in one list and sort together, because
+   * a person behind a tree has to be behind that tree.
    */
-  private paintPeople(
+  private paintStanding(
     ctx: CanvasRenderingContext2D,
     vw: number,
     vh: number,
@@ -336,31 +412,59 @@ export class FirstPerson {
   ): TagSpot[] {
     const tags: TagSpot[] = [];
     const invDet = 1 / (planeX * dirY - dirX * planeY);
+    const seen = this.seen;
+    seen.length = 0;
 
-    const seen: { p: Player; depth: number; screenX: number }[] = [];
-    for (const p of players) {
-      if (p.id === meId) continue; // you are the camera
-      const rx = p.x - eye.x;
-      const ry = p.y - eye.y;
+    const place = (wx: number, wy: number, player: Player | null, tree: Tree | null): void => {
+      const rx = wx - eye.x;
+      const ry = wy - eye.y;
+      // Cheap square reject before the transform — most of a forest is behind you.
+      if (rx * rx + ry * ry > FOG_FAR * FOG_FAR) return;
       const depth = invDet * (-planeY * rx + planeX * ry);
-      if (depth <= 1) continue; // behind you, or close enough to be inside your head
-      if (fogAt(depth) >= 0.985) continue; // swallowed by the haze — and so is the name
+      if (depth <= 1) return; // behind you, or close enough to be inside your head
+      if (fogAt(depth) >= 0.985) return; // swallowed by the haze
       const across = invDet * (dirY * rx - dirX * ry);
       const screenX = (vw / 2) * (1 + across / depth);
-      if (screenX < -vw || screenX > vw * 2) continue;
-      seen.push({ p, depth, screenX });
+      // Generous margin: a near tree is wide, and clipping it by its centre pops it.
+      if (screenX < -vw || screenX > vw * 2) return;
+      seen.push({ depth, screenX, player, tree });
+    };
+
+    for (const p of players) {
+      if (p.id === meId) continue; // you are the camera
+      place(p.x, p.y, p, null);
     }
-    // Far to near. Nobody can be behind the wall, so this is the entire depth test.
+    for (const t of trees()) place(t.x, t.y, null, t);
+
+    // Far to near. Nothing can be behind the wall, so this is the entire depth test.
     seen.sort((a, b) => b.depth - a.depth);
 
     ctx.imageSmoothingEnabled = false;
-    for (const { p, depth, screenX } of seen) {
+    const sprites = treeSprites();
+    for (const item of seen) {
+      const { depth, screenX } = item;
       const scale = focal / depth;
+      const fog = fogAt(depth);
+      /** Screen row of the ground it is standing on — where the shadow goes. */
+      const groundY = horizon + eye.height * scale;
+
+      if (item.tree) {
+        const w = Math.max(1, Math.round(TREE_W * scale));
+        const h = Math.max(1, Math.round(TREE_H * scale));
+        const left = Math.round(screenX - w / 2);
+        const topY = Math.round(groundY - h);
+        if (left > vw || left + w < 0 || topY > vh) continue;
+        const shW = Math.max(1, Math.round(w * 0.5));
+        ctx.fillStyle = `rgba(0,0,0,${0.24 * (1 - fog)})`;
+        ctx.fillRect(Math.round(screenX - shW / 2), Math.round(groundY - Math.max(1, w * 0.09)), shW, Math.max(1, Math.round(w * 0.16)));
+        ctx.drawImage(fadedTree(sprites, treeVariant(item.tree.vary), fog), left, topY, w, h);
+        continue;
+      }
+
+      const p = item.player!;
       const w = Math.max(1, Math.round(BODY_W * scale));
       const h = Math.max(1, Math.round(SPRITE_H * scale));
-      /** Screen row of the ground they are standing on — where the shadow goes. */
-      const groundY = horizon + eye.height * scale;
-      /** Their feet, which a jump lifts off that ground. */
+      /** Their feet, which a jump lifts off the ground. */
       const feetY = groundY - p.z * scale;
       const topY = Math.round(feetY - BODY_H * scale);
       const left = Math.round(screenX - w / 2);
@@ -371,12 +475,11 @@ export class FirstPerson {
       const lift = Math.min(1, p.z / 24);
       const shW = Math.max(1, Math.round(w * 0.8 * (1 - lift * 0.45)));
       const shH = Math.max(1, Math.round(w * 0.22));
-      ctx.fillStyle = `rgba(0,0,0,${0.3 - lift * 0.15})`;
+      ctx.fillStyle = `rgba(0,0,0,${(0.3 - lift * 0.15) * (1 - fog)})`;
       ctx.fillRect(Math.round(screenX - shW / 2), Math.round(groundY - shH / 2), shW, shH);
 
       this.sctx.clearRect(0, 0, BODY_W, SPRITE_H);
       paintPerson(this.sctx, 0, 0, p.hue, faceToward(p, eye, rightX, rightY), walkFrame(p, time));
-      const fog = fogAt(depth);
       if (fog > 0.02) {
         // `source-atop` tints the person and not the empty pixels around them, which
         // a rectangle of haze over the billboard would happily also do.
@@ -391,6 +494,38 @@ export class FirstPerson {
     }
     return tags;
   }
+}
+
+/**
+ * A tree at one of eight fog strengths, rasterised once and kept.
+ *
+ * A forest is a couple of hundred billboards in a frame. Tinting each one through a
+ * scratch canvas the way a person is tinted would be a couple of hundred clears,
+ * draws and composites; eight steps is close enough that nobody can see the banding
+ * against a haze that is itself a smooth gradient, and it turns all of that into a
+ * lookup and a blit.
+ */
+let faded: HTMLCanvasElement[][] | null = null;
+function fadedTree(sprites: HTMLCanvasElement[], variant: number, fog: number): HTMLCanvasElement {
+  if (!faded) {
+    faded = sprites.map((base) =>
+      Array.from({ length: FOG_STEPS }, (_unused, step) => {
+        const c = document.createElement('canvas');
+        c.width = base.width;
+        c.height = base.height;
+        const g = c.getContext('2d')!;
+        g.drawImage(base, 0, 0);
+        const a = step / (FOG_STEPS - 1);
+        if (a > 0) {
+          g.globalCompositeOperation = 'source-atop';
+          g.fillStyle = `rgba(${HAZE.r},${HAZE.g},${HAZE.b},${a})`;
+          g.fillRect(0, 0, c.width, c.height);
+        }
+        return c;
+      }),
+    );
+  }
+  return faded[variant][Math.min(FOG_STEPS - 1, Math.max(0, Math.round(fog * (FOG_STEPS - 1))))];
 }
 
 /**
@@ -431,6 +566,12 @@ const FACING: Record<Dir, { x: number; y: number }> = {
  */
 export function yawOf(dir: Dir): number {
   return Math.atan2(FACING[dir].y, FACING[dir].x);
+}
+
+/** Fold an angle into [-PI, PI], so "how far apart" is never the long way round. */
+function wrapAngle(a: number): number {
+  const t = ((a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+  return t - Math.PI;
 }
 
 /** 0 close enough to see plainly, 1 lost in the haze. */

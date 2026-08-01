@@ -41,6 +41,7 @@ export class Input {
   private jumpQueued = false;
   /** Same edge trick for the view switch — holding V must not strobe the camera. */
   private viewQueued = false;
+  private helpQueued = false;
   /** Thumbstick offset, already normalised to [-1, 1]. */
   private stick = { x: 0, y: 0 };
   private stickId = -1;
@@ -80,6 +81,8 @@ export class Input {
         e.preventDefault(); // space scrolls the page otherwise
       }
       if (e.key.toLowerCase() === 'v') this.viewQueued = true;
+      // Both, because `?` needs a shift on most layouts and none on some.
+      if (e.key === '?' || e.key === '/') this.helpQueued = true;
       // Arrows scroll the page otherwise, which drags the whole world sideways.
       if (e.key.startsWith('Arrow')) e.preventDefault();
     });
@@ -208,6 +211,7 @@ export class Input {
     this.keys.clear();
     this.jumpQueued = false;
     this.viewQueued = false;
+    this.helpQueued = false;
     this.stick = { x: 0, y: 0 };
     this.stickId = -1;
     this.lookId = -1;
@@ -243,6 +247,13 @@ export class Input {
     const v = this.viewQueued;
     this.viewQueued = false;
     return v;
+  }
+
+  /** Read and clear a pending request for the controls list. */
+  takeHelpToggle(): boolean {
+    const h = this.helpQueued;
+    this.helpQueued = false;
+    return h;
   }
 
   /** The current direction in WORLD space, keyboard and stick combined. */

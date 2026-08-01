@@ -19,11 +19,15 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { PROTOCOL_VERSION, decode, encode } from '../shared/protocol.js';
 import type { ClientMsg, ServerMsg } from '../shared/protocol.js';
 import {
+  HEAL_DELAY_MS,
+  MAX_HP,
   TICK_MS,
   TICK_RATE,
-  WORLD_PX_H,
-  WORLD_PX_W,
+  WATER,
+  spawnPoint,
   step,
+  stepHealth,
+  terrainAt,
 } from '../shared/world.js';
 import type { Player } from '../shared/world.js';
 
@@ -52,6 +56,11 @@ interface Session {
    */
   jump: boolean;
   helloDone: boolean;
+  /**
+   * When they were last standing in water. Healing waits on this rather than on a
+   * flag, so wading in and straight back out does not top you up for free.
+   */
+  wetAt: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -87,23 +96,27 @@ wss.on('connection', (socket: WebSocket) => {
     return;
   }
   const id = `w_${randomBytes(6).toString('base64url')}`;
+  // Somewhere dry and clear near the middle, rather than all on one pixel — and
+  // never in a lake, which would be a drowning you did not walk into.
+  const at = spawnPoint(Math.random());
   const session: Session = {
     socket,
     inx: 0,
     iny: 0,
     jump: false,
     helloDone: false,
+    wetAt: 0,
     player: {
       id,
       name: 'wanderer',
-      // Drop people in around the middle rather than all on one pixel.
-      x: WORLD_PX_W / 2 + (Math.random() * 96 - 48),
-      y: WORLD_PX_H / 2 + (Math.random() * 96 - 48),
+      x: at.x,
+      y: at.y,
       dir: 'down',
       moving: false,
       z: 0,
       vz: 0,
       hue: Math.floor(Math.random() * 360),
+      hp: MAX_HP,
     },
   };
 
@@ -188,6 +201,24 @@ setInterval(() => {
   for (const s of sessions.values()) {
     step(s.player, s.inx, s.iny, dt, s.jump);
     s.jump = false; // consumed — see `Session.jump`
+
+    /*
+     * Health is decided HERE and nowhere else. The client predicts its position
+     * because being briefly wrong about a pixel is invisible; it does not predict
+     * this, because being briefly wrong about whether somebody drowned is not.
+     */
+    if (s.player.z <= 0 && terrainAt(s.player.x, s.player.y) === WATER) s.wetAt = now;
+    if (stepHealth(s.player, dt, now - s.wetAt)) {
+      const back = spawnPoint(Math.random());
+      s.player.x = back.x;
+      s.player.y = back.y;
+      s.player.z = 0;
+      s.player.vz = 0;
+      s.player.hp = MAX_HP;
+      // Dry, or the next tick drowns them again where they stand.
+      s.wetAt = now - HEAL_DELAY_MS;
+      console.log(`[world] ${s.player.name} washed up back at the middle`);
+    }
   }
 
   // Serialise once, send to everyone. Every socket gets identical bytes.

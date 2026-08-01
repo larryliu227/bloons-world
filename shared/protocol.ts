@@ -33,7 +33,12 @@ export type ServerMsg =
   | { t: 'state'; tick: number; players: Player[] }
   | { t: 'pong'; ts: number };
 
-export const PROTOCOL_VERSION = 'world-1.0.0';
+/**
+ * Bumped for health: `Player` carries `hp` now, and a client that does not know
+ * about it would draw an empty bar over everybody. The map is NOT in this number —
+ * terrain is generated from shared code rather than sent, so it cannot be stale.
+ */
+export const PROTOCOL_VERSION = 'world-2.0.0';
 
 export function encode(msg: ClientMsg | ServerMsg): string {
   return JSON.stringify(msg);

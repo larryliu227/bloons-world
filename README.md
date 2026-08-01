@@ -1,15 +1,15 @@
 # BLOONS WORLD
 
-A 2D pixel world you walk around in, together. Right now that is all it is: walking,
-and other people — from above, or from inside it.
+A pixel world you walk around in, together — grass, lakes and forests, seen from
+above or from inside it.
 
 ```
-        ┌──────────────────────────┐                ▁▁▁▁▁▁▁▁▁▁▁▁▁▁
-        │  · ·  ▮        · ·    ·  │   ▮ else          ▟▙
-        │    ·      ▮ you     ·    │        press V   ▝▀▀▘
-        │  ·    · ·        ·    ·  │   ───────────▶  ░░░░░░░░░░░░░░
+        ┌──────────────────────────┐                ▁▁▁▁▁☀▁▁▁▁▁▁▁▁
+        │ ♣♣  ~~~~~   ▮      ♣♣♣   │   ▮ else         ♣ ▟▙ ♣♣
+        │ ♣    ~~~~ ▮ you     ♣♣   │        press V   ▝▀▀▘
+        │      ~~~~~~~~     ♣      │   ───────────▶  ░░░░░░░░░░░░░░
         └──────────────────────────┘                ▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-             64 x 64 tiles of grass                   eye level
+          64 x 64 tiles · ~ drowns you                 eye level
 ```
 
 ## Play
@@ -30,6 +30,15 @@ that is the last time — and **ENTER WORLD** drops you in.
   hold it, so there is no fixed pad to find and no wrong place to put your thumb. At
   eye level the screen splits: left thumb walks, right thumb looks, and the round
   button above JUMP switches back.
+- **?**, or the button in the corner, lists all of it at any time. It is the same
+  list on every device and it names both views, so nothing is discoverable only by
+  having read this file.
+
+**Deep water drains your health** — the ten pips top-left — and slows you to under
+half speed. Dry land gives it back after a moment's pause, and running out puts you
+back in the middle of the map with a full bar. Six seconds of swimming costs all ten,
+so a lake is a decision and not a wall. Trees are solid: you can slip between them,
+never through, and you cannot jump one.
 
 Vite binds `0.0.0.0`, so anyone on your Wi-Fi joins at `http://<your-lan-ip>:5174`
 and appears next to you. There is no lobby and no room code — one world, everybody
@@ -64,9 +73,9 @@ disagrees with, and clamping that vector is the whole anti-cheat surface of a
 walking game.
 
 ```
-shared/   world.ts (the rules of walking), protocol.ts (the wire)
+shared/   world.ts (walking, terrain, trees, health), protocol.ts (the wire)
 server/   http + ws on one port, the 20 Hz loop
-client/   the title screen, two renderers, input, the socket
+client/   the title screen, two renderers, the art, input, the HUD, the socket
 ```
 
 Two pieces of netcode carry the feel:
@@ -81,6 +90,41 @@ Two pieces of netcode carry the feel:
 
 `shared/world.ts` is imported by both sides on purpose. If the two ever disagreed
 about how fast a person walks, every player would rubber-band.
+
+**The map is never sent.** Terrain and trees are a pure function of tile coordinates,
+so the server and every client generate the same lakes and the same forests from the
+code they are already running. A 64x64 map would be a small download, but it would
+also be a thing that can be stale — and terrain that disagrees is terrain you walk
+through on one screen and bump into on another.
+
+Health is the exception to prediction: only the server writes it. Being briefly wrong
+about a pixel is invisible; being briefly wrong about whether somebody drowned is not.
+
+## What was making it shimmer
+
+Three separate things, none of which was the frame rate:
+
+- **The camera was rounded to whole world pixels.** Walking is 78 px/s and a world
+  pixel is four or five screen pixels, so the entire scene lurched sideways five
+  pixels at a time, about sixteen times a second. Now the scene is drawn at the
+  whole-pixel camera and the canvas *element* is slid by the leftover, rounded to
+  whole **device** pixels — every texel still lands exactly on the screen grid, and
+  the step shrinks by the scale times the pixel ratio. Measured: 1 CSS pixel per step
+  instead of 3 on a 1x display, and a third of that on a phone.
+- **Reconciliation was per frame, not per second.** A flat 12% of the error each
+  frame meant a 144 Hz screen corrected two and a half times faster than a 60 Hz one,
+  and a dropped frame corrected less. It is exponential decay over real elapsed time
+  now, so every machine gets the same curve.
+- **Remote players were interpolated against packet arrival times**, which are
+  exactly as jittery as the network. There is a render clock now: it advances at real
+  time and is only gently pulled toward what the snapshots say, so a late packet
+  spends a moment being a few milliseconds wrong instead of being right in a way you
+  can see.
+
+The resolution went up at the same time, which shrinks whatever is left: the view is
+whatever fits the window inside 460x300 world pixels, at the largest whole scale that
+does it. Both axes come from the window, so a phone in portrait gets a portrait
+viewport rather than black bars.
 
 ## The two views
 
@@ -100,11 +144,18 @@ The picture is made cheaply, in `client/fp.ts`:
 - **The wall around the world is four segments**, and the camera is always inside
   them, so a column's wall distance is one slab test. No DDA, no grid march. Jump and
   your eye clears it, which is the only way to find out there is nothing out there.
-- **People are billboards.** Nobody can hide behind the wall — everyone is inside it,
-  always — so drawing them far-to-near is the entire depth test. No z-buffer.
+- **Trees and people are billboards**, in one list that sorts together — a person
+  behind a tree has to be behind that tree. Nothing can hide behind the wall, since
+  everything is inside it always, so far-to-near IS the depth test. No z-buffer.
+  Trees are pre-tinted at eight fog strengths and then only ever blitted, because a
+  forest is a couple of hundred of them in a frame.
 
 Sky and fog are the same colour on purpose, so the far edge of the world dissolves
-instead of ending.
+instead of ending — and since the horizon end of that gradient is the pale one,
+distance washes things out rather than dimming them, which is what haze does and the
+only version of it that agrees with there being a sun up there. The sun is the one
+fixed thing in a world with no landmarks; without something in the sky to steer by,
+turning around at eye level loses you completely.
 
 The one thing it gives up: your look direction is not on the wire. Only the four-way
 facing the simulation already sets from movement is, so standing still and turning on
@@ -113,10 +164,25 @@ buy a versioned protocol and a new desync surface for a detail on a 10-pixel spr
 
 ## Art
 
-There are no assets. Every sprite is a dozen `fillRect` calls at 1x, scaled up by a
-whole number with smoothing off — which is what actually makes something look like
-pixel art. The ground is baked once into an offscreen canvas rather than redrawn
-four thousand tiles a frame, and `client/art.ts` hands the same canvas to both views
-so there is exactly one grass texture and one person in the program.
+There are no assets. Every sprite is a handful of `fillRect` calls at 1x, scaled up
+by a whole number with smoothing off — which is what actually makes something look
+like pixel art. The whole map is baked once into an offscreen canvas rather than
+redrawn four thousand tiles a frame, and `client/art.ts` hands the same canvas to
+both views, so there is exactly one grass texture and one tree in the program. Two
+copies would drift, and then the two views would be two worlds.
+
+The ground is painted in **8-pixel blocks shaded from a smooth noise field**, not in
+16-pixel tiles shaded from a per-tile hash. That is not a detail: the eye finds a
+tile-sized patchwork instantly and then cannot stop seeing it, and a lake shaded
+per tile is a checkerboard. Water depth is likewise averaged over a 5x5 neighbourhood
+and read back bilinearly, which turns the same numbers into a gradient from the
+shallows out to the deep. Foam is the one thing drawn per tile, because it *should*
+follow the tile edge — that bright line is exactly where the water starts hurting.
+
+Trees have a minimum spacing enforced at generation, which is a collision decision
+rather than an aesthetic one. Two trunks closer together than two bodies' clearance
+give a squeezed player no position that satisfies both, and the push-out solver then
+spends its passes shoving them back and forth. Thinning those pairs out when the
+forest is grown is the fix; solving an impossible position at run time is not.
 
 Stack: Node + TypeScript + `ws` + Vite + Canvas2D. One runtime dependency.

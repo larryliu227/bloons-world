@@ -8,19 +8,34 @@
  *    off, which is what actually makes something look like pixel art;
  *  - from eye level, in `fp.ts`, when `draw` is handed an `Eye`.
  *
- * Both are the same world at the same instant out of the same art. The camera rounds
- * to whole world pixels for the same reason the scale is an integer — a fractional
- * camera makes every straight edge shimmer as you walk.
+ * Both are the same world at the same instant out of the same art.
+ *
+ * THE CAMERA IS THE JITTER. Walking is 78 pixels a second and a world pixel is four
+ * or five screen pixels, so a camera rounded to whole world pixels shoves the entire
+ * scene sideways five pixels at a time, about sixteen times a second. That is not a
+ * frame-rate problem and no amount of interpolation fixes it. So the camera keeps
+ * its fraction: the scene is drawn at the whole-pixel camera, and the canvas ELEMENT
+ * is then slid by the leftover — rounded to whole DEVICE pixels, which keeps every
+ * texel landing exactly on the screen grid while cutting the step by the pixel
+ * ratio. Crisp, and smooth.
  */
 
-import { BODY_H, BODY_W, WORLD_PX_H, WORLD_PX_W } from '../shared/world.js';
-import type { Player } from '../shared/world.js';
-import { groundCanvas, paintPerson, walkFrame } from './art.js';
+import { BODY_H, BODY_W, WORLD_PX_H, WORLD_PX_W, trees } from '../shared/world.js';
+import type { Player, Tree } from '../shared/world.js';
+import { TREE_H, TREE_W, groundCanvas, paintPerson, treeSprites, treeVariant, walkFrame } from './art.js';
 import { FirstPerson } from './fp.js';
 import type { Eye, TagSpot } from './fp.js';
 
-/** How many world pixels tall the viewport is. Everything scales off this. */
-const VIEW_H = 176;
+/**
+ * The most world the viewport will ever show, in world pixels.
+ *
+ * The scale is the smallest whole number that keeps the window inside this, which is
+ * what "resolution" means here: a bigger bound means smaller, finer pixels and more
+ * world on screen. There is no letterbox — both axes are derived from the window, so
+ * a phone in portrait gets a portrait viewport instead of black bars.
+ */
+const MAX_VIEW_W = 460;
+const MAX_VIEW_H = 300;
 
 export class Renderer {
   /** Wrapper holding the canvas and the name-tag layer, so both share a transform. */
@@ -29,14 +44,17 @@ export class Renderer {
   private tagLayer: HTMLElement;
   private tags = new Map<string, HTMLElement>();
   private ctx: CanvasRenderingContext2D;
-  /** Viewport size in WORLD pixels — the canvas backing store is exactly this. */
-  private vw = 240;
-  private vh = VIEW_H;
-  private scale = 3;
+  /** The VISIBLE viewport in world pixels. The canvas is one pixel bigger — see below. */
+  private viewW = 240;
+  private viewH = 176;
+  private scale = 4;
+  /** CSS pixels per device pixel, which is the finest the camera slide can be. */
+  private dpr = 1;
   /** The ground, baked once and shared with the first-person view. */
   private ground: HTMLCanvasElement;
   /** Built the first time somebody actually looks through it. */
   private fp: FirstPerson | null = null;
+  private slid = '';
 
   constructor() {
     this.el = document.createElement('div');
@@ -65,19 +83,31 @@ export class Renderer {
   resize(): void {
     const cssW = window.innerWidth;
     const cssH = window.innerHeight;
+    this.dpr = Math.max(1, window.devicePixelRatio || 1);
     /*
-     * Pick the biggest WHOLE-number scale that fits. A fractional scale is what
-     * turns crisp pixel art into mush, so it is better to letterbox a few pixels
-     * than to draw at 2.7x.
+     * The smallest WHOLE scale that keeps the view inside the bound above. A
+     * fractional scale is what turns crisp pixel art into mush, so the choice is
+     * between whole numbers and the bound decides which one.
      */
-    this.scale = Math.max(2, Math.floor(cssH / VIEW_H));
-    this.vh = VIEW_H;
-    this.vw = Math.ceil(cssW / this.scale);
-    this.canvas.width = this.vw;
-    this.canvas.height = this.vh;
-    this.canvas.style.width = `${this.vw * this.scale}px`;
-    this.canvas.style.height = `${this.vh * this.scale}px`;
+    this.scale = clamp(Math.ceil(Math.max(cssW / MAX_VIEW_W, cssH / MAX_VIEW_H)), 2, 8);
+    this.viewW = Math.ceil(cssW / this.scale);
+    this.viewH = Math.ceil(cssH / this.scale);
+
+    // One world pixel of overdraw on the right and bottom, which is the room the
+    // camera needs to slide into. Without it, sliding would expose an empty edge.
+    this.canvas.width = this.viewW + 1;
+    this.canvas.height = this.viewH + 1;
+    this.canvas.style.width = `${(this.viewW + 1) * this.scale}px`;
+    this.canvas.style.height = `${(this.viewH + 1) * this.scale}px`;
+    this.el.style.width = `${this.viewW * this.scale}px`;
+    this.el.style.height = `${this.viewH * this.scale}px`;
     this.ctx.imageSmoothingEnabled = false;
+    this.slide(0, 0);
+  }
+
+  /** How many world pixels are on screen. `main` wants this for the first-person eye. */
+  get view(): { w: number; h: number } {
+    return { w: this.viewW + 1, h: this.viewH + 1 };
   }
 
   /**
@@ -89,35 +119,87 @@ export class Renderer {
   draw(players: Player[], meId: string, time: number, eye: Eye | null): void {
     let spots: TagSpot[];
     if (eye) {
+      // Nothing to slide: the first-person camera is never quantised in the first
+      // place, because floor casting works in floats all the way down.
+      this.slide(0, 0);
       if (!this.fp) this.fp = new FirstPerson();
-      spots = this.fp.draw(this.ctx, this.vw, this.vh, eye, players, meId, time);
+      spots = this.fp.draw(this.ctx, this.canvas.width, this.canvas.height, eye, players, meId, time);
     } else {
       spots = this.drawFromAbove(players, meId, time);
     }
     this.placeTags(spots, players, meId);
   }
 
-  /** The top-down view: ground blit, then everybody, back to front. */
+  /** The top-down view: ground blit, then everything standing on it, back to front. */
   private drawFromAbove(players: Player[], meId: string, time: number): TagSpot[] {
     const me = players.find((p) => p.id === meId);
     const ctx = this.ctx;
+    const cw = this.canvas.width;
+    const ch = this.canvas.height;
 
-    // Camera: centred on you, clamped to the world, rounded to whole pixels.
-    const camX = Math.round(clamp((me?.x ?? WORLD_PX_W / 2) - this.vw / 2, 0, Math.max(0, WORLD_PX_W - this.vw)));
-    const camY = Math.round(clamp((me?.y ?? WORLD_PX_H / 2) - this.vh / 2, 0, Math.max(0, WORLD_PX_H - this.vh)));
+    // Camera: centred on you and clamped to the world, kept as a float.
+    const camXf = clamp((me?.x ?? WORLD_PX_W / 2) - this.viewW / 2, 0, Math.max(0, WORLD_PX_W - this.viewW));
+    const camYf = clamp((me?.y ?? WORLD_PX_H / 2) - this.viewH / 2, 0, Math.max(0, WORLD_PX_H - this.viewH));
+    const camX = Math.floor(camXf);
+    const camY = Math.floor(camYf);
+    /*
+     * The leftover, quantised to whole device pixels. Sliding the element by this
+     * is what makes walking smooth; quantising it to the device grid is what keeps
+     * every world pixel landing on an exact multiple of screen pixels rather than
+     * being resampled across two of them.
+     */
+    const grid = this.scale * this.dpr;
+    const fx = Math.round((camXf - camX) * grid) / grid;
+    const fy = Math.round((camYf - camY) * grid) / grid;
+    this.slide(-fx * this.scale, -fy * this.scale);
 
     ctx.fillStyle = '#101820';
-    ctx.fillRect(0, 0, this.vw, this.vh);
+    ctx.fillRect(0, 0, cw, ch);
     ctx.drawImage(this.ground, -camX, -camY);
 
+    /*
+     * One painter's list for everything that stands up off the ground. Whoever is
+     * further down the screen is in front — which is what puts you behind the tree
+     * you are standing above and in front of the one you are standing below.
+     */
+    const sprites = treeSprites();
+    const standing: { y: number; tree: Tree | null; player: Player | null }[] = [];
+    for (const t of trees()) {
+      if (t.x < camX - TREE_W || t.x > camX + cw + TREE_W) continue;
+      if (t.y < camY - 4 || t.y > camY + ch + TREE_H) continue;
+      standing.push({ y: t.y, tree: t, player: null });
+    }
+    for (const p of players) standing.push({ y: p.y, tree: null, player: p });
+    standing.sort((a, b) => a.y - b.y);
+
     const spots: TagSpot[] = [];
-    // Painter's algorithm: whoever is further down the screen is in front.
-    for (const p of [...players].sort((a, b) => a.y - b.y)) {
+    for (const item of standing) {
+      if (item.tree) {
+        const t = item.tree;
+        const sx = Math.round(t.x - camX - TREE_W / 2);
+        const sy = Math.round(t.y - camY - TREE_H);
+        // A pool of shade under the trunk, so it is planted rather than floating.
+        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        ctx.fillRect(sx + 4, Math.round(t.y - camY) - 2, TREE_W - 8, 3);
+        ctx.drawImage(sprites[treeVariant(t.vary)], sx, sy);
+        continue;
+      }
+      const p = item.player!;
       this.drawPerson(p, p.x - camX, p.y - camY, time, p.id === meId);
       // Follows the sprite up when they jump, so the tag stays over their head.
-      spots.push({ id: p.id, x: p.x - camX, y: p.y - camY - BODY_H - p.z - 3 });
+      // Measured from the FLOAT camera, because a div can sit on any subpixel it
+      // likes and a label that snaps while the world glides is worse than either.
+      spots.push({ id: p.id, x: p.x - camXf + fx, y: p.y - camYf + fy - BODY_H - p.z - 3 });
     }
     return spots;
+  }
+
+  /** Slide the canvas under the stage's clip. See the file comment. */
+  private slide(x: number, y: number): void {
+    const t = x === 0 && y === 0 ? 'none' : `translate3d(${x}px, ${y}px, 0)`;
+    if (t === this.slid) return;
+    this.slid = t;
+    this.canvas.style.transform = t;
   }
 
   /** Position one crisp label per spot, and retire the ones who left or dropped out. */
@@ -138,9 +220,9 @@ export class Renderer {
       tag.classList.toggle('me', p.id === meId);
       const sx = spot.x * this.scale;
       const sy = spot.y * this.scale;
-      tag.style.transform = `translate(${Math.round(sx)}px, ${Math.round(sy)}px) translateX(-50%)`;
+      tag.style.transform = `translate(${sx.toFixed(1)}px, ${sy.toFixed(1)}px) translateX(-50%)`;
       // Cheap cull: a label parked far off-screen still costs layout.
-      tag.style.display = sx < -80 || sy < -40 || sx > this.vw * this.scale + 80 ? 'none' : '';
+      tag.style.display = sx < -80 || sy < -40 || sx > this.viewW * this.scale + 80 ? 'none' : '';
     }
     for (const [id, el] of this.tags) {
       if (alive.has(id)) continue;
@@ -164,7 +246,7 @@ export class Renderer {
      */
     const groundY = Math.round(sy);
     const y = Math.round(sy - BODY_H - p.z);
-    if (x < -32 || y < -48 || x > this.vw + 32 || y > this.vh + 48) return;
+    if (x < -32 || y < -48 || x > this.canvas.width + 32 || y > this.canvas.height + 48) return;
 
     /*
      * The shadow stays on the ground and shrinks with height. It is the only cue

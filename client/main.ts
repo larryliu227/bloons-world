@@ -20,10 +20,11 @@
  * identical traffic and the netcode above never learns there are two of them.
  */
 
-import { INPUT_RATE, INTERP_DELAY_MS, clampToWorld, step } from '../shared/world.js';
+import { INPUT_RATE, INTERP_DELAY_MS, MAX_HP, clampToWorld, step } from '../shared/world.js';
 import type { Player } from '../shared/world.js';
 import { EYE_H, yawOf } from './fp.js';
 import type { Eye } from './fp.js';
+import { Hud } from './hud.js';
 import { Input } from './input.js';
 import { Menu } from './menu.js';
 import { Net } from './net.js';
@@ -38,10 +39,7 @@ const renderer = new Renderer();
 root.appendChild(renderer.el);
 const input = new Input(root);
 const net = new Net(loadName());
-
-const hud = document.createElement('div');
-hud.className = 'hud';
-root.appendChild(hud);
+const hud = new Hud(root);
 
 /*
  * The name box.
@@ -75,9 +73,6 @@ nameBox.addEventListener('blur', commitName);
 nameBox.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') nameBox.blur();
 });
-const status = document.createElement('div');
-status.className = 'status';
-root.appendChild(status);
 
 /*
  * The title screen. It owns the socket's start: nothing is connected until
@@ -117,8 +112,7 @@ menu.onEnter = (chosen) => {
 };
 
 net.onStatus = (s, detail) => {
-  status.textContent = detail;
-  status.dataset.state = s;
+  hud.setStatus(s, detail);
   menu.setStatus(s, detail);
 };
 
@@ -133,11 +127,22 @@ const me: Player = {
   z: 0,
   vz: 0,
   hue: 0,
+  hp: MAX_HP,
 };
 let seeded = false;
 
 let lastInputAt = 0;
 let lastFrame = performance.now();
+/**
+ * How much of the server's disagreement to swallow per second.
+ *
+ * This used to be a flat 12% PER FRAME, which meant a 144 Hz screen reconciled two
+ * and a half times faster than a 60 Hz one and a dropped frame reconciled less —
+ * the correction speed was whatever the monitor happened to be. Exponential decay
+ * over the real elapsed time gives every machine the same curve, which is one of
+ * the two things that were actually making the walk shimmer.
+ */
+const CATCH_UP_RATE = 8;
 /** A jump waiting for the next input frame, and one for the local prediction. */
 let jumpPending = false;
 let predictJump = false;
@@ -151,11 +156,35 @@ let predictJump = false;
  */
 let firstPerson = false;
 
+/**
+ * The clock the world is DRAWN at, which is not the clock it arrives on.
+ *
+ * Snapshots are stamped when they land, and when they land is exactly as jittery as
+ * the network is: 40ms, then 65, then 45. Interpolating against those stamps hands
+ * that jitter straight to everybody's legs. So this advances at real time — smooth
+ * by construction — and is only pulled gently toward where the snapshots say it
+ * should be. A late packet slows nobody down; it just spends a moment being wrong by
+ * a few milliseconds, which is invisible, instead of being right in a way you can
+ * see.
+ */
+let renderAt = 0;
+/** How fast that pull is, and the gap at which it gives up and jumps. */
+const CLOCK_PULL = 2.2;
+const CLOCK_RESYNC_MS = 400;
+
 function loop(now: number): void {
   requestAnimationFrame(loop);
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
   input.update(dt);
+
+  const target = (net.last?.at ?? now) - INTERP_DELAY_MS;
+  if (renderAt === 0) renderAt = target;
+  renderAt += dt * 1000;
+  const drift = target - renderAt;
+  // A backgrounded tab, a long stall, or a fresh connection: too far to walk back.
+  if (Math.abs(drift) > CLOCK_RESYNC_MS) renderAt = target;
+  else renderAt += drift * (1 - Math.exp(-CLOCK_PULL * dt));
 
   if (input.takeViewToggle()) {
     firstPerson = !firstPerson;
@@ -163,7 +192,9 @@ function loop(now: number): void {
     // the way in costs a second of "which way am I pointed" every single time.
     if (firstPerson) input.yaw = yawOf(me.dir);
     input.setFirstPerson(firstPerson);
+    hud.setFirstPerson(firstPerson);
   }
+  if (input.takeHelpToggle()) hud.toggleHelp();
 
   const v = firstPerson ? worldMove(input.moveLocal(), input.yaw) : input.vector();
   // Latched here rather than read inside the timed block below: a jump pressed
@@ -201,21 +232,27 @@ function loop(now: number): void {
     if (server) {
       /*
        * Reconcile softly. A hard snap every 50ms is visible as a stutter even when
-       * the correction is a single pixel; easing 12% of the error per frame closes
-       * a real disagreement in a few frames and hides a rounding one entirely.
+       * the correction is a single pixel; bleeding off the error exponentially
+       * closes a real disagreement in a few frames and hides a rounding one
+       * entirely. See `CATCH_UP_RATE` for why it is per second and not per frame.
        */
       const ex = server.x - me.x;
       const ey = server.y - me.y;
       if (Math.hypot(ex, ey) > 24) {
-        // Too far to be latency — we were wrong, or we were moved. Accept it.
+        // Too far to be latency — we were wrong, or we drowned and were moved back
+        // to the middle. Accept it.
         me.x = server.x;
         me.y = server.y;
       } else {
-        me.x += ex * 0.12;
-        me.y += ey * 0.12;
+        const catchUp = 1 - Math.exp(-CATCH_UP_RATE * dt);
+        me.x += ex * catchUp;
+        me.y += ey * catchUp;
       }
       me.hue = server.hue;
       me.id = server.id;
+      // Health is the server's alone; there is nothing to predict and nothing to
+      // ease. It arrives already smooth, because it changes by fractions of a pip.
+      me.hp = server.hp;
       /*
        * Height is taken from the server outright rather than eased.
        * A jump is short and its arc is the whole read — easing it produces a
@@ -232,8 +269,9 @@ function loop(now: number): void {
 
   // Nothing to draw behind the title, and the title is opaque — so do not.
   if (!entered) return;
-  renderer.draw(worldNow(now), net.id, now / 1000, eyeNow(now / 1000));
-  hud.textContent = `${net.last?.players.length ?? 0} here`;
+  renderer.draw(worldNow(), net.id, now / 1000, eyeNow(now / 1000));
+  hud.setCount(net.last?.players.length ?? 0);
+  hud.setHealth(me.hp);
 }
 
 /** The camera for the first-person view, or null to look down at the world. */
@@ -279,13 +317,13 @@ function worldMove(m: { fwd: number; strafe: number }, yaw: number): { x: number
  * Everybody, positioned for this instant: remote players interpolated between the
  * last two snapshots, and you from local prediction.
  */
-function worldNow(now: number): Player[] {
+function worldNow(): Player[] {
   const last = net.last;
   if (!last) return seeded ? [me] : [];
   const prev = net.prev ?? last;
   const span = Math.max(1, last.at - prev.at);
-  // Where we want to be: one interpolation delay behind the newest frame.
-  const t = clamp01((now - INTERP_DELAY_MS - prev.at) / span);
+  // Against the smoothed render clock, NOT against arrival times. See `renderAt`.
+  const t = clamp01((renderAt - prev.at) / span);
 
   const out: Player[] = [];
   for (const p of last.players) {

@@ -1,0 +1,193 @@
+/**
+ * BLOONS WORLD — the things floating over the world.
+ *
+ * The health bar, the head count, the connection state, and the list of what you
+ * can actually do. All DOM rather than canvas, for the same reason the name tags
+ * are: text drawn at world resolution and upscaled with smoothing off is mush, and
+ * this is the part of the screen that has to be readable.
+ *
+ * Everything here is written to only when it CHANGES. It is called from inside the
+ * frame loop, and setting `textContent` sixty times a second on a string that is the
+ * same string sixty times a second is layout work in exchange for nothing.
+ */
+
+import { MAX_HP } from '../shared/world.js';
+import type { Status } from './net.js';
+
+/**
+ * Whether this is a machine with a pointer or a machine with thumbs.
+ *
+ * Only used to decide which half of the controls list to put FIRST — both halves are
+ * always there. A laptop with a touchscreen is both, and guessing wrong should cost
+ * a scroll rather than the information.
+ */
+const TOUCH = window.matchMedia('(hover: none), (pointer: coarse)').matches;
+
+export class Hud {
+  private bar: HTMLElement;
+  private pips: HTMLElement[] = [];
+  private count: HTMLElement;
+  private status: HTMLElement;
+  private helpBtn: HTMLButtonElement;
+  private help: HTMLElement;
+  private shownPips = -1;
+  private shownCount = -1;
+  private shownStatus = '';
+
+  constructor(root: HTMLElement) {
+    this.count = div('hud', root);
+    this.status = div('status', root);
+
+    /*
+     * Ten pips, because the number is ten. Not a bar that fills — at this size a
+     * continuous bar loses its last tenth to rounding, and "how many hits do I have
+     * left" is a counting question rather than a proportion one.
+     */
+    this.bar = div('health', root);
+    for (let i = 0; i < MAX_HP; i++) {
+      const pip = document.createElement('i');
+      this.bar.appendChild(pip);
+      this.pips.push(pip);
+    }
+
+    this.helpBtn = document.createElement('button');
+    this.helpBtn.type = 'button';
+    this.helpBtn.className = 'help-btn';
+    this.helpBtn.textContent = '?';
+    this.helpBtn.setAttribute('aria-label', 'controls');
+    this.helpBtn.addEventListener('click', () => this.toggleHelp());
+    root.appendChild(this.helpBtn);
+
+    this.help = div('help', root);
+    this.help.hidden = true;
+    this.help.appendChild(buildHelp());
+    // Anywhere outside the card closes it. A panel you have to hunt for the close
+    // button on is a panel that ends up staying open over the game.
+    this.help.addEventListener('click', (e) => {
+      if (e.target === this.help) this.toggleHelp();
+    });
+    this.help.querySelector('.help-close')?.addEventListener('click', () => this.toggleHelp());
+  }
+
+  /** Fill in pips to match `hp`, rounding up so a scratch is not a whole heart. */
+  setHealth(hp: number): void {
+    const lit = Math.max(0, Math.min(MAX_HP, Math.ceil(hp - 0.001)));
+    if (lit === this.shownPips) return;
+    this.shownPips = lit;
+    for (let i = 0; i < this.pips.length; i++) this.pips[i].classList.toggle('on', i < lit);
+    // Below a third the bar starts breathing, so drowning is noticed by somebody
+    // who is looking at the water rather than at the corner of the screen.
+    this.bar.classList.toggle('low', lit > 0 && lit <= 3);
+  }
+
+  setCount(n: number): void {
+    if (n === this.shownCount) return;
+    this.shownCount = n;
+    this.count.textContent = `${n} here`;
+  }
+
+  setStatus(s: Status, detail: string): void {
+    if (detail === this.shownStatus) return;
+    this.shownStatus = detail;
+    this.status.textContent = detail;
+    this.status.dataset.state = s;
+  }
+
+  /** The controls list names both views, so it says which one you are in. */
+  setFirstPerson(on: boolean): void {
+    this.help.classList.toggle('in-world', on);
+  }
+
+  toggleHelp(): void {
+    this.help.hidden = !this.help.hidden;
+    this.helpBtn.classList.toggle('open', !this.help.hidden);
+  }
+}
+
+function div(cls: string, parent: HTMLElement): HTMLElement {
+  const el = document.createElement('div');
+  el.className = cls;
+  parent.appendChild(el);
+  return el;
+}
+
+interface Row {
+  keys: string;
+  what: string;
+}
+
+const LOOKING_DOWN: Row[] = [
+  { keys: 'W A S D  ·  arrows', what: 'walk' },
+  { keys: 'space', what: 'jump' },
+  { keys: 'V', what: 'stand in the world' },
+];
+
+const IN_WORLD: Row[] = [
+  { keys: 'W  ·  S', what: 'forward, back' },
+  { keys: 'A  ·  D', what: 'step sideways' },
+  { keys: 'mouse', what: 'look — click once to catch the cursor' },
+  { keys: '←  →  ·  Q  E', what: 'turn on the spot' },
+  { keys: 'space', what: 'jump — high enough to see over the edge' },
+  { keys: 'V  ·  esc', what: 'back to looking down, let the cursor go' },
+];
+
+const THUMBS: Row[] = [
+  { keys: 'left half', what: 'press anywhere and steer — that spot is the stick' },
+  { keys: 'right half', what: 'drag to look, once you are in the world' },
+  { keys: 'JUMP', what: 'the big round one' },
+  { keys: '1ST · TOP', what: 'swap between the two views' },
+];
+
+const RULES: Row[] = [
+  { keys: 'water', what: 'slows you and drains your health — dry land gives it back' },
+  { keys: 'trees', what: 'solid. You can slip between them, not through them' },
+  { keys: 'the edge', what: 'a wall. Jump at it and you can just see over' },
+];
+
+function buildHelp(): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'help-card';
+
+  const head = document.createElement('div');
+  head.className = 'help-head';
+  head.appendChild(text('h2', '', 'WHAT YOU CAN DO'));
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'help-close';
+  close.textContent = '×';
+  close.setAttribute('aria-label', 'close');
+  head.appendChild(close);
+  card.appendChild(head);
+
+  const keyboard = [
+    section('LOOKING DOWN AT IT', LOOKING_DOWN, 'top'),
+    section('STANDING IN IT', IN_WORLD, 'fp'),
+  ];
+  const touch = [section('ON A TOUCH SCREEN', THUMBS, '')];
+  // Whichever you are most likely to be holding goes first; both are always here.
+  for (const s of TOUCH ? [...touch, ...keyboard] : [...keyboard, ...touch]) card.appendChild(s);
+  card.appendChild(section('AND THE WORLD ITSELF', RULES, ''));
+
+  card.appendChild(text('p', 'help-foot', '? or the corner button opens this again'));
+  return card;
+}
+
+function section(title: string, rows: Row[], mark: string): HTMLElement {
+  const s = document.createElement('section');
+  if (mark) s.dataset.view = mark;
+  s.appendChild(text('h3', '', title));
+  const dl = document.createElement('dl');
+  for (const r of rows) {
+    dl.appendChild(text('dt', '', r.keys));
+    dl.appendChild(text('dd', '', r.what));
+  }
+  s.appendChild(dl);
+  return s;
+}
+
+function text(tag: string, cls: string, body: string): HTMLElement {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  n.textContent = body;
+  return n;
+}
