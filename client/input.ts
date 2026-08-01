@@ -42,6 +42,23 @@ export class Input {
   /** Same edge trick for the view switch — holding V must not strobe the camera. */
   private viewQueued = false;
   private helpQueued = false;
+  /**
+   * A swing and a throw waiting to be sent, on the same edge trick.
+   *
+   * Leaning on the button must not queue up a hundred attacks for the moment the
+   * cooldown lifts — the server enforces the rate anyway, but sending it a hundred
+   * messages to reject is a hundred messages.
+   */
+  private hitQueued = false;
+  private throwQueued = false;
+  /**
+   * Where the mouse is, in CSS pixels, or null if this machine has not seen one.
+   *
+   * Only used to aim from above, where facing is four-way and pointing at what you
+   * mean is the difference between a fight and a coin toss. Null on a phone, where
+   * facing is all there is.
+   */
+  private cursor: { x: number; y: number } | null = null;
   /** Thumbstick offset, already normalised to [-1, 1]. */
   private stick = { x: 0, y: 0 };
   private stickId = -1;
@@ -67,6 +84,7 @@ export class Input {
   private root: HTMLElement;
   private jumpBtn!: HTMLButtonElement;
   private viewBtn!: HTMLButtonElement;
+  private throwBtn!: HTMLButtonElement;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -80,7 +98,10 @@ export class Input {
         this.jumpQueued = true;
         e.preventDefault(); // space scrolls the page otherwise
       }
-      if (e.key.toLowerCase() === 'v') this.viewQueued = true;
+      const k = e.key.toLowerCase();
+      if (k === 'v') this.viewQueued = true;
+      if (k === 'f') this.hitQueued = true;
+      if (k === 'r') this.throwQueued = true;
       // Both, because `?` needs a shift on most layouts and none on some.
       if (e.key === '?' || e.key === '/') this.helpQueued = true;
       // Arrows scroll the page otherwise, which drags the whole world sideways.
@@ -117,7 +138,12 @@ export class Input {
     });
     root.appendChild(this.jumpBtn);
 
-    // The view switch, for thumbs. Keyboards have V.
+    /*
+     * The view switch lives up in the corner with the help button rather than down
+     * by JUMP: swapping camera is a thing you do between doing things, and the
+     * bottom right is now three buttons of fighting that a thumb has to hit without
+     * looking.
+     */
     this.viewBtn = document.createElement('button');
     this.viewBtn.className = 'view-btn';
     this.viewBtn.textContent = '1ST';
@@ -128,16 +154,39 @@ export class Input {
     });
     root.appendChild(this.viewBtn);
 
+    const attackBtn = (cls: string, label: string, set: () => void): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.className = cls;
+      b.textContent = label;
+      b.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        if (!this.on) return;
+        set();
+      });
+      root.appendChild(b);
+      return b;
+    };
+    attackBtn('hit-btn', 'HIT', () => {
+      this.hitQueued = true;
+    });
+    this.throwBtn = attackBtn('throw-btn', 'THROW', () => {
+      this.throwQueued = true;
+    });
+
     const RADIUS = 46;
     root.addEventListener('pointerdown', (e) => {
       if (!this.on || isChrome(e.target)) return;
       if (e.pointerType === 'mouse') {
+        // Left swings, right throws — the same two everywhere, and the reason the
+        // context menu is suppressed below.
+        if (e.button === 0) this.hitQueued = true;
+        else if (e.button === 2) this.throwQueued = true;
         /*
          * Mouse look without pointer lock, for when the browser refuses it or the
          * player pressed Escape. Held-drag rather than free move: an unlocked
          * cursor that spins the camera whenever it crosses the window is unusable.
          */
-        if (this.fp) this.mouseLook = true;
+        if (this.fp && e.button === 0) this.mouseLook = true;
         return;
       }
       // Looking around and walking are the two halves of the screen. Above, there
@@ -195,9 +244,14 @@ export class Input {
       }
     });
     window.addEventListener('mousemove', (e) => {
+      this.cursor = { x: e.clientX, y: e.clientY };
       if (!this.on || !this.fp) return;
       if (document.pointerLockElement !== root && !this.mouseLook) return;
       this.look(e.movementX * MOUSE_YAW, -e.movementY * MOUSE_PITCH);
+    });
+    // Right-click is the throw, so it must not also be the browser's menu.
+    root.addEventListener('contextmenu', (e) => {
+      if (this.on) e.preventDefault();
     });
   }
 
@@ -212,6 +266,8 @@ export class Input {
     this.jumpQueued = false;
     this.viewQueued = false;
     this.helpQueued = false;
+    this.hitQueued = false;
+    this.throwQueued = false;
     this.stick = { x: 0, y: 0 };
     this.stickId = -1;
     this.lookId = -1;
@@ -254,6 +310,41 @@ export class Input {
     const h = this.helpQueued;
     this.helpQueued = false;
     return h;
+  }
+
+  /** Read and clear a pending swing. */
+  takeHit(): boolean {
+    const h = this.hitQueued;
+    this.hitQueued = false;
+    return h;
+  }
+
+  /** Read and clear a pending throw. */
+  takeThrow(): boolean {
+    const t = this.throwQueued;
+    this.throwQueued = false;
+    return t;
+  }
+
+  /** Grey the THROW button out when there is nothing in hand to throw. */
+  setPebbles(n: number): void {
+    this.throwBtn.classList.toggle('empty', n <= 0);
+  }
+
+  /**
+   * Where to aim, in radians, from above.
+   *
+   * The cursor if there is one, because facing is four-way and a swing is a cone —
+   * pointing at what you mean is the difference between a fight and a coin toss.
+   * `null` on a machine that has never seen a mouse, and the caller falls back to
+   * whichever way the sprite is looking.
+   */
+  aimFromCursor(originX: number, originY: number): number | null {
+    if (!this.cursor) return null;
+    const dx = this.cursor.x - originX;
+    const dy = this.cursor.y - originY;
+    if (Math.hypot(dx, dy) < 6) return null; // on top of yourself: no direction in it
+    return Math.atan2(dy, dx);
   }
 
   /** The current direction in WORLD space, keyboard and stick combined. */

@@ -128,6 +128,9 @@ const me: Player = {
   vz: 0,
   hue: 0,
   hp: MAX_HP,
+  pebbles: 0,
+  down: 0,
+  swing: 0,
 };
 let seeded = false;
 
@@ -196,13 +199,29 @@ function loop(now: number): void {
   }
   if (input.takeHelpToggle()) hud.toggleHelp();
 
-  const v = firstPerson ? worldMove(input.moveLocal(), input.yaw) : input.vector();
+  /*
+   * Flat on your back, nothing you press does anything — including here, not just on
+   * the server. Predicting a walk the server is going to refuse means two seconds of
+   * being dragged back to where you fell, which reads as a broken connection rather
+   * than as being knocked down.
+   */
+  const flat = me.down > 0;
+  const v = flat ? ZERO : firstPerson ? worldMove(input.moveLocal(), input.yaw) : input.vector();
   // Latched here rather than read inside the timed block below: a jump pressed
   // between two input frames would otherwise be thrown away.
-  if (input.takeJump()) {
+  if (input.takeJump() && !flat) {
     jumpPending = true;
     predictJump = true;
   }
+
+  /*
+   * Attacks go out the INSTANT they are pressed rather than on the next input frame.
+   * They are rare, they are edge-triggered, and up to 50ms of delay on a swing is
+   * the difference between connecting and watching somebody walk out of range. The
+   * server still decides everything about them; all this sends is the bearing.
+   */
+  if (input.takeHit() && !flat) net.attack('hit', aim());
+  if (input.takeThrow() && !flat) net.attack('throw', aim());
 
   // Post intent at a fixed rate rather than every frame — a 144 Hz screen does not
   // get to send seven times more input than a 20 Hz one.
@@ -212,6 +231,9 @@ function loop(now: number): void {
     jumpPending = false;
   }
 
+  // Everybody but you, positioned for this instant. Wanted twice below: once as
+  // bodies to bump into, and once to draw.
+  const others = worldNow();
   const server = net.last?.players.find((p) => p.id === net.id);
   if (server && !seeded) {
     // First snapshot: take the server's spawn wholesale rather than easing to it.
@@ -227,7 +249,10 @@ function loop(now: number): void {
      * sides run `step`. Waiting for the server to start the hop is the difference
      * between a jump that feels connected to the key and one that does not.
      */
-    step(me, v.x, v.y, dt, predictJump);
+    // Predicted against everybody else's body too, so walking into somebody stops
+    // you here and not a round trip later. The bodies are the interpolated ones,
+    // a tenth of a second stale, which reconciliation is exactly what it is for.
+    step(me, v.x, v.y, dt, predictJump, others);
     predictJump = false;
     if (server) {
       /*
@@ -239,8 +264,7 @@ function loop(now: number): void {
       const ex = server.x - me.x;
       const ey = server.y - me.y;
       if (Math.hypot(ex, ey) > 24) {
-        // Too far to be latency — we were wrong, or we drowned and were moved back
-        // to the middle. Accept it.
+        // Too far to be latency — we were simply wrong. Accept it.
         me.x = server.x;
         me.y = server.y;
       } else {
@@ -250,9 +274,17 @@ function loop(now: number): void {
       }
       me.hue = server.hue;
       me.id = server.id;
-      // Health is the server's alone; there is nothing to predict and nothing to
-      // ease. It arrives already smooth, because it changes by fractions of a pip.
+      /*
+       * Health, stones in hand, the swing and the knockdown are the server's alone.
+       * None of it is predicted: being briefly wrong about a pixel is invisible,
+       * being briefly wrong about whether a hit landed is not, and a bar that
+       * flickered down and back on every mispredicted swing would be worse than one
+       * that answers a round trip late.
+       */
       me.hp = server.hp;
+      me.pebbles = server.pebbles;
+      me.down = server.down;
+      me.swing = server.swing;
       /*
        * Height is taken from the server outright rather than eased.
        * A jump is short and its arc is the whole read — easing it produces a
@@ -269,10 +301,17 @@ function loop(now: number): void {
 
   // Nothing to draw behind the title, and the title is opaque — so do not.
   if (!entered) return;
-  renderer.draw(worldNow(), net.id, now / 1000, eyeNow(now / 1000));
+  const everyone = seeded ? [...others, me] : others;
+  renderer.draw(everyone, net.id, now / 1000, eyeNow(now / 1000), stonesNow(now), net.last?.gone ?? EMPTY);
   hud.setCount(net.last?.players.length ?? 0);
-  hud.setHealth(me.hp);
+  hud.setHealth(me.hp, me.down > 0);
+  hud.setPebbles(me.pebbles);
+  input.setPebbles(me.pebbles);
 }
+
+/** One empty set and one still vector, rather than a fresh one of each every frame. */
+const EMPTY: ReadonlySet<number> = new Set();
+const ZERO = { x: 0, y: 0 };
 
 /** The camera for the first-person view, or null to look down at the world. */
 function eyeNow(time: number): Eye | null {
@@ -314,12 +353,13 @@ function worldMove(m: { fwd: number; strafe: number }, yaw: number): { x: number
 }
 
 /**
- * Everybody, positioned for this instant: remote players interpolated between the
- * last two snapshots, and you from local prediction.
+ * Everybody ELSE, positioned for this instant, interpolated between the last two
+ * snapshots. You are not in here: you come from local prediction, and `me` is
+ * appended at the point of drawing.
  */
 function worldNow(): Player[] {
   const last = net.last;
-  if (!last) return seeded ? [me] : [];
+  if (!last) return [];
   const prev = net.prev ?? last;
   const span = Math.max(1, last.at - prev.at);
   // Against the smoothed render clock, NOT against arrival times. See `renderAt`.
@@ -339,8 +379,40 @@ function worldNow(): Player[] {
       y: before.y + (p.y - before.y) * t,
     });
   }
-  if (seeded) out.push(me);
   return out;
+}
+
+/**
+ * Stones in the air, extrapolated forward from the newest snapshot.
+ *
+ * Not interpolated like people are: a stone crosses eleven pixels a tick, so drawing
+ * one a tenth of a second in the past puts it two body-widths behind where it looks
+ * like it should be. They fly in a straight line at a known speed, so running that
+ * line forward from the last thing the server said is both smoother AND more honest
+ * than lagging it — and if it turns out to have already hit somebody, it vanishes,
+ * which is what a stone that hit somebody should do anyway.
+ */
+function stonesNow(now: number): { x: number; y: number }[] {
+  const last = net.last;
+  if (!last) return [];
+  const ahead = Math.max(0, Math.min(0.25, (now - last.at) / 1000));
+  return last.stones.map((s) => ({ x: s.x + s.vx * ahead, y: s.y + s.vy * ahead }));
+}
+
+/**
+ * Which way an attack goes.
+ *
+ * Standing in the world it is wherever you are looking. From above it is the cursor
+ * if there is one, because facing is four-way and a swing is a cone — and failing
+ * that, whichever way the sprite is turned, which is all a thumb has to say with.
+ */
+function aim(): number {
+  if (firstPerson) return input.yaw;
+  const box = renderer.el.getBoundingClientRect();
+  // You are always in the middle of your own screen, except against the world's edge
+  // where the camera stops and you walk on across it — so ask the renderer.
+  const at = renderer.screenOf(me.x, me.y);
+  return input.aimFromCursor(box.left + at.x, box.top + at.y) ?? yawOf(me.dir);
 }
 
 function clamp01(v: number): number {

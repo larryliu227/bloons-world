@@ -89,8 +89,8 @@ html, body {
   border-radius: 2px;
   pointer-events: none;
 }
-.hud { top: calc(var(--pad-t) + 26px); left: var(--pad-l); }
-.status { top: var(--pad-t); right: calc(var(--pad-r) + 40px); }
+.hud { top: calc(var(--pad-t) + 52px); left: var(--pad-l); }
+.status { top: var(--pad-t); right: calc(var(--pad-r) + 84px); }
 .status[data-state="online"] { color: #7ee787; }
 .status[data-state="connecting"] { color: #ffd23d; }
 .status[data-state="offline"] { color: #ff7b72; }
@@ -126,6 +126,51 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
   .health.low i.on { animation: none; }
 }
+
+/* Stones in hand, counted the same way the pips are — three pips is one swing, so
+ * both numbers want reading the same way. */
+.ammo {
+  position: fixed;
+  top: calc(var(--pad-t) + 27px);
+  left: var(--pad-l);
+  display: flex;
+  gap: 3px;
+  padding: 4px 6px;
+  background: var(--panel);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.ammo i {
+  width: 6px;
+  height: 6px;
+  align-self: center;
+  border-radius: 2px;
+  background: rgba(226, 240, 255, 0.14);
+  transition: background 140ms linear;
+}
+.ammo i.on { background: #b9bec7; }
+.ammo.empty { opacity: 0.45; }
+
+/*
+ * There is no death screen, because there is no death. Two seconds, a word, and you
+ * are up — anything heavier would be pretending something happened that did not.
+ */
+.down-note {
+  position: fixed;
+  left: 50%;
+  top: 38%;
+  transform: translateX(-50%);
+  padding: 7px 13px;
+  background: rgba(10, 14, 20, 0.82);
+  border: 1px solid rgba(255, 93, 85, 0.5);
+  border-radius: 3px;
+  color: #ff8a84;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.down-note[hidden] { display: none; }
 
 /* Floating thumbstick: appears wherever a thumb lands, vanishes on release. */
 .stick {
@@ -168,7 +213,7 @@ html, body {
 
 /* ----------------------------------------------------------------- the buttons */
 
-.jump, .view-btn, .help-btn {
+.jump, .hit-btn, .throw-btn, .view-btn, .help-btn {
   position: fixed;
   background: rgba(226, 240, 255, 0.12);
   color: var(--ink);
@@ -179,9 +224,15 @@ html, body {
   touch-action: none;
   cursor: pointer;
 }
-.jump:active, .view-btn:active, .help-btn:active { background: rgba(226, 240, 255, 0.32); }
+.jump:active, .hit-btn:active, .throw-btn:active,
+.view-btn:active, .help-btn:active { background: rgba(226, 240, 255, 0.32); }
 
-/* Jump, for thumbs. Bottom-right, opposite the stick, and big enough to hit. */
+/*
+ * The three thumb buttons, bottom right, opposite the stick. JUMP is biggest and
+ * lowest because it is pressed most and by the fattest part of a thumb; HIT and
+ * THROW sit up and in from it, far enough apart that a miss is a miss rather than
+ * the other attack.
+ */
 .jump {
   right: calc(var(--pad-r) + 8px);
   bottom: calc(var(--pad-b) + 16px);
@@ -189,20 +240,44 @@ html, body {
   height: 76px;
   font-size: 12px;
 }
-/* The view switch, above JUMP so a thumb reaches both without moving hands. */
-.view-btn {
+.hit-btn {
+  right: calc(var(--pad-r) + 94px);
+  bottom: calc(var(--pad-b) + 34px);
+  width: 58px;
+  height: 58px;
+  font-size: 11px;
+  border-color: rgba(255, 232, 176, 0.4);
+}
+.throw-btn {
   right: calc(var(--pad-r) + 22px);
-  bottom: calc(var(--pad-b) + 102px);
-  width: 48px;
-  height: 48px;
+  bottom: calc(var(--pad-b) + 104px);
+  width: 58px;
+  height: 58px;
   font-size: 10px;
 }
-/* Keyboards have space and V; only show those two where there are no keys. */
+/* Nothing in hand. Still pressable — the refusal is the server's — but it should
+ * not look like it is going to do something. */
+.throw-btn.empty { opacity: 0.35; }
+
+/* Keyboards have space, F and R; only show those where there are no keys. */
 @media (hover: hover) and (pointer: fine) {
-  .jump, .view-btn { display: none; }
+  .jump, .hit-btn, .throw-btn { display: none; }
 }
 
-/* The controls list is wanted on every device, so this one never hides. */
+/*
+ * The view switch and the controls list are chrome rather than thumb controls, so
+ * they live up in the corner on every device — out of the way of a hand that is
+ * busy, and in the place people look for buttons rather than for a game.
+ */
+.view-btn {
+  top: var(--pad-t);
+  right: calc(var(--pad-r) + 38px);
+  width: 40px;
+  height: 32px;
+  border-radius: 16px;
+  font-size: 10px;
+  padding: 0;
+}
 .help-btn {
   top: var(--pad-t);
   right: var(--pad-r);
@@ -405,7 +480,11 @@ html, body {
 #app.title .hud,
 #app.title .status,
 #app.title .health,
+#app.title .ammo,
+#app.title .down-note,
 #app.title .namebox,
 #app.title .jump,
+#app.title .hit-btn,
+#app.title .throw-btn,
 #app.title .view-btn,
 #app.title .stage { visibility: hidden; }

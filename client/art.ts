@@ -12,8 +12,8 @@
  * half-pixels anywhere.
  */
 
-import { GRASS, SAND, TILE, WATER, WORLD_H, WORLD_PX_H, WORLD_PX_W, WORLD_W, terrainGrid } from '../shared/world.js';
-import type { Dir, Terrain } from '../shared/world.js';
+import { BERRY, GRASS, SAND, TILE, WATER, WORLD_H, WORLD_PX_H, WORLD_PX_W, WORLD_W, terrainGrid } from '../shared/world.js';
+import type { Dir, ItemKind, Terrain } from '../shared/world.js';
 
 /** The colour of the wall around the world, and of the stripe baked into the grass. */
 export const EDGE_RGB = { r: 36, g: 48, b: 68 };
@@ -306,6 +306,8 @@ export function walkFrame(p: { moving: boolean; z: number }, time: number): numb
  * Just the body — no shadow and no ring. Those are placed differently by each view
  * (on the ground under the sprite from above, projected onto the floor plane from
  * eye level), so they belong to the renderer that knows where the ground is.
+ *
+ * `down` draws them flat instead, which is what being on nought pips looks like.
  */
 export function paintPerson(
   ctx: CanvasRenderingContext2D,
@@ -314,10 +316,29 @@ export function paintPerson(
   hue: number,
   dir: Dir,
   frame: number,
+  down = false,
 ): void {
   const body = `hsl(${hue} 62% 56%)`;
   const dark = `hsl(${hue} 55% 38%)`;
   const BODY_W = 10;
+
+  if (down) {
+    /*
+     * Flat on their back: the same colours, wide and low, at the bottom of the box
+     * where their feet were. A knocked-down player has to be legible as a PERSON
+     * who is down rather than as a missing sprite, and the one thing that reads at
+     * ten pixels is the silhouette going from tall to wide.
+     */
+    ctx.fillStyle = body;
+    ctx.fillRect(x, y + 8, BODY_W, 4);
+    ctx.fillStyle = dark;
+    ctx.fillRect(x, y + 11, BODY_W, 1);
+    ctx.fillStyle = '#f0c9a0';
+    ctx.fillRect(x + BODY_W - 4, y + 7, 4, 3);
+    ctx.fillStyle = dark;
+    ctx.fillRect(x + BODY_W - 4, y + 7, 4, 1);
+    return;
+  }
 
   ctx.fillStyle = dark;
   ctx.fillRect(x + 2, y + 9 + (frame > 0 ? 1 : 0), 2, 3);
@@ -340,4 +361,41 @@ export function paintPerson(
   }
   // Facing sideways: one eye, pushed to the side you are looking.
   ctx.fillRect(dir === 'right' ? x + BODY_W - 4 : x + 3, y + 3, 1, 1);
+}
+
+/**
+ * A berry cluster and a loose stone, both about four pixels of the world.
+ *
+ * Small on purpose. They are scattered over a 1024-pixel map and the point of one is
+ * spotting it from across a clearing, which wants a bright dot rather than an object
+ * — anything bigger starts competing with the people for attention.
+ */
+export function paintItem(ctx: CanvasRenderingContext2D, x: number, y: number, kind: ItemKind): void {
+  if (kind === BERRY) {
+    ctx.fillStyle = '#2f6b33';
+    ctx.fillRect(x - 2, y - 1, 5, 2);
+    ctx.fillStyle = '#e8455c';
+    ctx.fillRect(x - 2, y - 3, 2, 2);
+    ctx.fillRect(x + 1, y - 4, 2, 2);
+    ctx.fillStyle = '#ff8a99';
+    ctx.fillRect(x - 2, y - 3, 1, 1);
+    return;
+  }
+  ctx.fillStyle = '#8b8f98';
+  ctx.fillRect(x - 2, y - 3, 4, 3);
+  ctx.fillStyle = '#b9bec7';
+  ctx.fillRect(x - 2, y - 3, 2, 1);
+  ctx.fillStyle = '#5c616b';
+  ctx.fillRect(x - 2, y - 1, 4, 1);
+}
+
+/** A stone in the air. Two pixels and a highlight is all one is. */
+export function paintStone(ctx: CanvasRenderingContext2D, x: number, y: number, scale = 1): void {
+  const s = Math.max(1, Math.round(3 * scale));
+  ctx.fillStyle = '#a8adb6';
+  ctx.fillRect(Math.round(x - s / 2), Math.round(y - s / 2), s, s);
+  if (s >= 3) {
+    ctx.fillStyle = '#d6dae1';
+    ctx.fillRect(Math.round(x - s / 2), Math.round(y - s / 2), 1, 1);
+  }
 }

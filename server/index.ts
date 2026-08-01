@@ -19,17 +19,31 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { PROTOCOL_VERSION, decode, encode } from '../shared/protocol.js';
 import type { ClientMsg, ServerMsg } from '../shared/protocol.js';
 import {
-  HEAL_DELAY_MS,
+  BERRY,
+  MAX_CARRY,
   MAX_HP,
+  MELEE_COOLDOWN,
+  MELEE_DAMAGE,
+  PEBBLE_DAMAGE,
+  PEBBLE_RANGE,
+  PEBBLE_SPEED,
+  PEBBLE_HIT_R,
+  PICKUP_R,
+  REGROW_MS,
+  SWING_MS,
+  THROW_COOLDOWN,
   TICK_MS,
   TICK_RATE,
-  WATER,
+  eat,
+  hurt,
+  inSwing,
+  items,
   spawnPoint,
   step,
-  stepHealth,
-  terrainAt,
+  stepStone,
+  stepTimers,
 } from '../shared/world.js';
-import type { Player } from '../shared/world.js';
+import type { Player, Stone } from '../shared/world.js';
 
 const PORT = readPort();
 const PRODUCTION = process.env.NODE_ENV === 'production';
@@ -56,11 +70,9 @@ interface Session {
    */
   jump: boolean;
   helloDone: boolean;
-  /**
-   * When they were last standing in water. Healing waits on this rather than on a
-   * flag, so wading in and straight back out does not top you up for free.
-   */
-  wetAt: number;
+  /** When they may swing and throw again. Rate limiting IS the anti-cheat here. */
+  swingAt: number;
+  throwAt: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -97,7 +109,7 @@ wss.on('connection', (socket: WebSocket) => {
   }
   const id = `w_${randomBytes(6).toString('base64url')}`;
   // Somewhere dry and clear near the middle, rather than all on one pixel — and
-  // never in a lake, which would be a drowning you did not walk into.
+  // never in a lake, which would be a first ten seconds spent wading out of one.
   const at = spawnPoint(Math.random());
   const session: Session = {
     socket,
@@ -105,7 +117,8 @@ wss.on('connection', (socket: WebSocket) => {
     iny: 0,
     jump: false,
     helloDone: false,
-    wetAt: 0,
+    swingAt: 0,
+    throwAt: 0,
     player: {
       id,
       name: 'wanderer',
@@ -117,6 +130,9 @@ wss.on('connection', (socket: WebSocket) => {
       vz: 0,
       hue: Math.floor(Math.random() * 360),
       hp: MAX_HP,
+      pebbles: 0,
+      down: 0,
+      swing: 0,
     },
   };
 
@@ -175,6 +191,14 @@ function route(s: Session, msg: ClientMsg): void {
       if (msg.jump === true) s.jump = true;
       return;
 
+    case 'hit':
+      swing(s, msg.a);
+      return;
+
+    case 'throw':
+      lob(s, msg.a);
+      return;
+
     case 'rename':
       s.player.name = sanitizeName(msg.name);
       return;
@@ -184,6 +208,68 @@ function route(s: Session, msg: ClientMsg): void {
     default:
       return;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Fighting
+//
+// Every one of these decisions is the server's. The client says which way it is
+// pointing and nothing else — not whether it may attack, not who was in range, not
+// what it cost them. A client that could report its own hits could report all of
+// them.
+
+/** Stones in the air, and the counter that names them. */
+const stones: Stone[] = [];
+let stoneId = 0;
+
+/**
+ * Which item indices are picked, and when each grows back.
+ *
+ * Keyed by index into the shared `items()` list, which both sides generate
+ * identically — so what goes on the wire is a handful of numbers rather than three
+ * hundred positions twenty times a second.
+ */
+const takenUntil = new Map<number, number>();
+
+function swing(s: Session, aim: number): void {
+  const now = performance.now();
+  if (s.player.down > 0 || now < s.swingAt) return;
+  s.swingAt = now + MELEE_COOLDOWN * 1000;
+  s.player.swing = SWING_MS / 1000;
+  const a = safeAngle(aim);
+  for (const other of sessions.values()) {
+    if (other === s || !other.helloDone) continue;
+    if (!inSwing(s.player, a, other.player)) continue;
+    if (hurt(other.player, MELEE_DAMAGE)) knockedDown(s.player, other.player);
+  }
+}
+
+function lob(s: Session, aim: number): void {
+  const now = performance.now();
+  if (s.player.down > 0 || now < s.throwAt || s.player.pebbles <= 0) return;
+  s.throwAt = now + THROW_COOLDOWN * 1000;
+  s.player.pebbles -= 1;
+  const a = safeAngle(aim);
+  stones.push({
+    id: ++stoneId,
+    by: s.player.id,
+    // Leaves the hand, not the feet — otherwise the first thing every stone hits is
+    // the ground the thrower is standing on.
+    x: s.player.x + Math.cos(a) * 6,
+    y: s.player.y + Math.sin(a) * 6,
+    vx: Math.cos(a) * PEBBLE_SPEED,
+    vy: Math.sin(a) * PEBBLE_SPEED,
+    left: PEBBLE_RANGE,
+  });
+}
+
+function knockedDown(by: Player, who: Player): void {
+  console.log(`[world] ${by.name} put ${who.name} on the ground`);
+}
+
+/** A finite angle, or straight ahead. `NaN` here would put a stone nowhere at all. */
+function safeAngle(a: number): number {
+  return Number.isFinite(a) ? a : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,33 +284,64 @@ setInterval(() => {
   lastAt = now;
   tick += 1;
 
-  for (const s of sessions.values()) {
-    step(s.player, s.inx, s.iny, dt, s.jump);
+  const live = [...sessions.values()];
+  const world = items();
+
+  for (const s of live) {
+    stepTimers(s.player, dt);
+    if (s.player.down > 0) {
+      // Flat on your back: no walking, and the jump you were holding is forgotten.
+      s.jump = false;
+      continue;
+    }
+    // Everybody else's body, so people stop at each other instead of overlapping.
+    const others = live.filter((o) => o !== s).map((o) => o.player);
+    step(s.player, s.inx, s.iny, dt, s.jump, others);
     s.jump = false; // consumed — see `Session.jump`
 
-    /*
-     * Health is decided HERE and nowhere else. The client predicts its position
-     * because being briefly wrong about a pixel is invisible; it does not predict
-     * this, because being briefly wrong about whether somebody drowned is not.
-     */
-    if (s.player.z <= 0 && terrainAt(s.player.x, s.player.y) === WATER) s.wetAt = now;
-    if (stepHealth(s.player, dt, now - s.wetAt)) {
-      const back = spawnPoint(Math.random());
-      s.player.x = back.x;
-      s.player.y = back.y;
-      s.player.z = 0;
-      s.player.vz = 0;
-      s.player.hp = MAX_HP;
-      // Dry, or the next tick drowns them again where they stand.
-      s.wetAt = now - HEAL_DELAY_MS;
-      console.log(`[world] ${s.player.name} washed up back at the middle`);
+    // Anything lying where they are walking. Berries are only taken if they would
+    // mend something, so a full player walks over them and leaves them for whoever
+    // needs one.
+    for (let i = 0; i < world.length; i++) {
+      if (takenUntil.has(i)) continue;
+      const it = world[i];
+      if (Math.hypot(it.x - s.player.x, it.y - s.player.y) > PICKUP_R) continue;
+      if (it.kind === BERRY) {
+        if (eat(s.player)) takenUntil.set(i, now + REGROW_MS);
+      } else if (s.player.pebbles < MAX_CARRY) {
+        s.player.pebbles += 1;
+        takenUntil.set(i, now + REGROW_MS);
+      }
     }
   }
 
+  for (const [i, at] of takenUntil) if (now >= at) takenUntil.delete(i);
+
+  // Stones, last, so they meet everybody where this tick left them.
+  for (let i = stones.length - 1; i >= 0; i--) {
+    const stone = stones[i];
+    let spent = !stepStone(stone, dt);
+    if (!spent) {
+      for (const s of live) {
+        if (s.player.id === stone.by || s.player.down > 0) continue;
+        if (Math.hypot(s.player.x - stone.x, s.player.y - stone.y) > PEBBLE_HIT_R) continue;
+        // A stone passes under somebody at the top of a jump.
+        if (s.player.z > 14) continue;
+        if (hurt(s.player, PEBBLE_DAMAGE)) {
+          const thrower = sessions.get(stone.by);
+          if (thrower) knockedDown(thrower.player, s.player);
+        }
+        spent = true;
+        break;
+      }
+    }
+    if (spent) stones.splice(i, 1);
+  }
+
   // Serialise once, send to everyone. Every socket gets identical bytes.
-  const players = [...sessions.values()].map((s) => s.player);
-  const frame = encode({ t: 'state', tick, players });
-  for (const s of sessions.values()) {
+  const players = live.map((s) => s.player);
+  const frame = encode({ t: 'state', tick, players, stones, gone: [...takenUntil.keys()] });
+  for (const s of live) {
     if (s.socket.readyState === WebSocket.OPEN) s.socket.send(frame);
   }
 }, TICK_MS);

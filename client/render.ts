@@ -20,9 +20,19 @@
  * ratio. Crisp, and smooth.
  */
 
-import { BODY_H, BODY_W, WORLD_PX_H, WORLD_PX_W, trees } from '../shared/world.js';
+import { BODY_H, BODY_W, MELEE_RANGE, SWING_MS, WORLD_PX_H, WORLD_PX_W, items, trees } from '../shared/world.js';
 import type { Player, Tree } from '../shared/world.js';
-import { TREE_H, TREE_W, groundCanvas, paintPerson, treeSprites, treeVariant, walkFrame } from './art.js';
+import {
+  TREE_H,
+  TREE_W,
+  groundCanvas,
+  paintItem,
+  paintPerson,
+  paintStone,
+  treeSprites,
+  treeVariant,
+  walkFrame,
+} from './art.js';
 import { FirstPerson } from './fp.js';
 import type { Eye, TagSpot } from './fp.js';
 
@@ -55,6 +65,9 @@ export class Renderer {
   /** Built the first time somebody actually looks through it. */
   private fp: FirstPerson | null = null;
   private slid = '';
+  /** The effective camera from the last top-down frame, for `screenOf`. */
+  private camX = 0;
+  private camY = 0;
 
   constructor() {
     this.el = document.createElement('div');
@@ -111,27 +124,51 @@ export class Renderer {
   }
 
   /**
+   * Where a world position lands on screen, in CSS pixels within the stage.
+   *
+   * `main` needs it to work out the angle from you to the mouse: you are usually in
+   * the middle of your own screen, but not against the edge of the world, where the
+   * camera stops and you keep walking across it.
+   */
+  screenOf(x: number, y: number): { x: number; y: number } {
+    return { x: (x - this.camX) * this.scale, y: (y - this.camY) * this.scale };
+  }
+
+  /**
    * One frame. Pass an `Eye` to stand in the world, or null to look down at it.
    *
    * Either way the labels are placed the same afterwards: the view says where each
    * name landed on the canvas and this puts a crisp div there.
    */
-  draw(players: Player[], meId: string, time: number, eye: Eye | null): void {
+  draw(
+    players: Player[],
+    meId: string,
+    time: number,
+    eye: Eye | null,
+    stones: readonly { x: number; y: number }[],
+    gone: ReadonlySet<number>,
+  ): void {
     let spots: TagSpot[];
     if (eye) {
       // Nothing to slide: the first-person camera is never quantised in the first
       // place, because floor casting works in floats all the way down.
       this.slide(0, 0);
       if (!this.fp) this.fp = new FirstPerson();
-      spots = this.fp.draw(this.ctx, this.canvas.width, this.canvas.height, eye, players, meId, time);
+      spots = this.fp.draw(this.ctx, this.canvas.width, this.canvas.height, eye, players, meId, time, stones, gone);
     } else {
-      spots = this.drawFromAbove(players, meId, time);
+      spots = this.drawFromAbove(players, meId, time, stones, gone);
     }
     this.placeTags(spots, players, meId);
   }
 
   /** The top-down view: ground blit, then everything standing on it, back to front. */
-  private drawFromAbove(players: Player[], meId: string, time: number): TagSpot[] {
+  private drawFromAbove(
+    players: Player[],
+    meId: string,
+    time: number,
+    stones: readonly { x: number; y: number }[],
+    gone: ReadonlySet<number>,
+  ): TagSpot[] {
     const me = players.find((p) => p.id === meId);
     const ctx = this.ctx;
     const cw = this.canvas.width;
@@ -153,9 +190,27 @@ export class Renderer {
     const fy = Math.round((camYf - camY) * grid) / grid;
     this.slide(-fx * this.scale, -fy * this.scale);
 
+    this.camX = camX + fx;
+    this.camY = camY + fy;
+
     ctx.fillStyle = '#101820';
     ctx.fillRect(0, 0, cw, ch);
     ctx.drawImage(this.ground, -camX, -camY);
+
+    /*
+     * Berries and stones lie ON the ground rather than standing on it, so they go
+     * down before the painter's list and never sort with it — nothing is ever behind
+     * a berry.
+     */
+    const world = items();
+    for (let i = 0; i < world.length; i++) {
+      if (gone.has(i)) continue;
+      const it = world[i];
+      const sx = Math.round(it.x - camX);
+      const sy = Math.round(it.y - camY);
+      if (sx < -8 || sy < -8 || sx > cw + 8 || sy > ch + 8) continue;
+      paintItem(ctx, sx, sy, it.kind);
+    }
 
     /*
      * One painter's list for everything that stands up off the ground. Whoever is
@@ -189,8 +244,12 @@ export class Renderer {
       // Follows the sprite up when they jump, so the tag stays over their head.
       // Measured from the FLOAT camera, because a div can sit on any subpixel it
       // likes and a label that snaps while the world glides is worse than either.
-      spots.push({ id: p.id, x: p.x - camXf + fx, y: p.y - camYf + fy - BODY_H - p.z - 3 });
+      const lift = p.down > 0 ? 4 : BODY_H + p.z;
+      spots.push({ id: p.id, x: p.x - camXf + fx, y: p.y - camYf + fy - lift - 3 });
     }
+
+    // Stones last: they fly over everything, including whoever threw them.
+    for (const s of stones) paintStone(ctx, s.x - camX, s.y - camY);
     return spots;
   }
 
@@ -258,7 +317,23 @@ export class Renderer {
     ctx.fillStyle = `rgba(0,0,0,${0.28 - lift * 0.14})`;
     ctx.fillRect(x + 1 + Math.round((BODY_W - 2 - shW) / 2), groundY - 1, shW, 2);
 
-    paintPerson(ctx, x, y, p.hue, p.dir, walkFrame(p, time));
+    /*
+     * The swing, drawn as an arc of the ground it covers rather than as a weapon.
+     * There is nothing in anybody's hand, so what has to read is REACH — the shape
+     * on the floor is the honest picture of who was close enough, and it is the
+     * same cone the server tested.
+     */
+    if (p.swing > 0) {
+      const a = swingAim(p);
+      const fade = Math.min(1, p.swing / (SWING_MS / 1000));
+      ctx.strokeStyle = `rgba(255,232,176,${0.5 * fade})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(Math.round(sx), Math.round(sy) - 4, MELEE_RANGE, a - 0.9, a + 0.9);
+      ctx.stroke();
+    }
+
+    paintPerson(ctx, x, p.down > 0 ? groundY - BODY_H : y, p.hue, p.dir, walkFrame(p, time), p.down > 0);
 
     if (isMe) {
       // A ring under your own feet — with everybody the same size and shape, this is
@@ -275,4 +350,17 @@ export class Renderer {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
+}
+
+/**
+ * Which way to draw somebody's swing.
+ *
+ * The bearing they actually aimed at is not on the wire — only the four-way facing
+ * is — so the arc is drawn along that. It is a hair off what the server tested when
+ * the swinger was pointing between two compass points with a mouse, and it is the
+ * same trade as everything else about aim: a whole float per player per tick, twenty
+ * times a second, to make a flourish a few degrees more accurate.
+ */
+function swingAim(p: Player): number {
+  return p.dir === 'right' ? 0 : p.dir === 'down' ? Math.PI / 2 : p.dir === 'left' ? Math.PI : -Math.PI / 2;
 }

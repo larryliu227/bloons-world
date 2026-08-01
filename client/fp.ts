@@ -23,15 +23,17 @@
  * above the horizon, so the far edge of the world dissolves instead of ending.
  */
 
-import { BODY_H, BODY_W, WORLD_PX_H, WORLD_PX_W, trees } from '../shared/world.js';
-import type { Dir, Player, Tree } from '../shared/world.js';
+import { BODY_H, BODY_W, WORLD_PX_H, WORLD_PX_W, items, trees } from '../shared/world.js';
+import type { Dir, Item, Player, Tree } from '../shared/world.js';
 import {
   EDGE_RGB,
   TREE_H,
   TREE_W,
   groundPixels,
   pack,
+  paintItem,
   paintPerson,
+  paintStone,
   treeSprites,
   treeVariant,
   walkFrame,
@@ -87,6 +89,24 @@ const SUN_RGB = { r: 255, g: 232, b: 176 };
 
 /** The sprite is one pixel taller than the body: the forward leg hangs below. */
 const SPRITE_H = BODY_H + 1;
+/** Big enough to hold a berry cluster or a loose stone with room around it. */
+const ITEM_BOX = 6;
+
+/**
+ * Nothing is ever drawn as though it were closer than this, in world pixels.
+ *
+ * A person is ten pixels wide. Bodies stop each other at nine, so the moment you
+ * close to swinging distance the true projection magnifies that sprite about thirty
+ * times — and thirty times a ten-pixel sprite is not a person, it is a flat field of
+ * one colour across a third of the screen, with the head and the feet both outside
+ * the frame. The perspective is right and the picture is useless.
+ *
+ * So the SIZE and the height of anything nearer than this is computed as if it were
+ * exactly here, while its position across the screen stays true. Somebody in your
+ * face still looms, still stands where they are standing, and is still legibly a
+ * person you could aim at. It is a lie, and it is a smaller lie than the alternative.
+ */
+const MIN_DRAW_DEPTH = 21;
 
 /** How many pre-tinted copies of each tree to keep. See `fadedTree`. */
 const FOG_STEPS = 8;
@@ -111,12 +131,15 @@ export interface TagSpot {
   y: number;
 }
 
-/** One thing standing in the world, already transformed into camera space. */
+/** One thing in the world, already transformed into camera space. */
 interface Billboard {
   depth: number;
   screenX: number;
   player: Player | null;
   tree: Tree | null;
+  item: Item | null;
+  /** A stone in the air, which unlike everything else is not standing on anything. */
+  stone: { x: number; y: number } | null;
 }
 
 export class FirstPerson {
@@ -127,6 +150,9 @@ export class FirstPerson {
   /** One person is painted here at 1x, then blitted scaled. */
   private scratch: HTMLCanvasElement;
   private sctx: CanvasRenderingContext2D;
+  /** And one berry or loose stone here, for the same reason. */
+  private items: HTMLCanvasElement;
+  private ictx: CanvasRenderingContext2D;
   /** Reused every frame so a forest is not two hundred fresh objects a frame. */
   private seen: Billboard[] = [];
 
@@ -137,6 +163,13 @@ export class FirstPerson {
     const ctx = this.scratch.getContext('2d');
     if (!ctx) throw new Error('canvas 2d unavailable');
     this.sctx = ctx;
+
+    this.items = document.createElement('canvas');
+    this.items.width = ITEM_BOX;
+    this.items.height = ITEM_BOX;
+    const ictx = this.items.getContext('2d');
+    if (!ictx) throw new Error('canvas 2d unavailable');
+    this.ictx = ictx;
   }
 
   /**
@@ -152,6 +185,8 @@ export class FirstPerson {
     players: Player[],
     meId: string,
     time: number,
+    stones: readonly { x: number; y: number }[],
+    gone: ReadonlySet<number>,
   ): TagSpot[] {
     if (this.w !== vw || this.h !== vh || !this.img) {
       this.w = vw;
@@ -182,7 +217,8 @@ export class FirstPerson {
     ctx.putImageData(this.img, 0, 0);
 
     return this.paintStanding(
-      ctx, vw, vh, horizon, focal, eye, players, meId, time, dirX, dirY, planeX, planeY, rightX, rightY,
+      ctx, vw, vh, horizon, focal, eye, players, meId, time, stones, gone,
+      dirX, dirY, planeX, planeY, rightX, rightY,
     );
   }
 
@@ -403,6 +439,8 @@ export class FirstPerson {
     players: Player[],
     meId: string,
     time: number,
+    stones: readonly { x: number; y: number }[],
+    gone: ReadonlySet<number>,
     dirX: number,
     dirY: number,
     planeX: number,
@@ -415,7 +453,14 @@ export class FirstPerson {
     const seen = this.seen;
     seen.length = 0;
 
-    const place = (wx: number, wy: number, player: Player | null, tree: Tree | null): void => {
+    const place = (
+      wx: number,
+      wy: number,
+      player: Player | null,
+      tree: Tree | null,
+      item: Item | null = null,
+      stone: { x: number; y: number } | null = null,
+    ): void => {
       const rx = wx - eye.x;
       const ry = wy - eye.y;
       // Cheap square reject before the transform — most of a forest is behind you.
@@ -427,7 +472,7 @@ export class FirstPerson {
       const screenX = (vw / 2) * (1 + across / depth);
       // Generous margin: a near tree is wide, and clipping it by its centre pops it.
       if (screenX < -vw || screenX > vw * 2) return;
-      seen.push({ depth, screenX, player, tree });
+      seen.push({ depth, screenX, player, tree, item, stone });
     };
 
     for (const p of players) {
@@ -435,6 +480,12 @@ export class FirstPerson {
       place(p.x, p.y, p, null);
     }
     for (const t of trees()) place(t.x, t.y, null, t);
+    const world = items();
+    for (let i = 0; i < world.length; i++) {
+      if (gone.has(i)) continue;
+      place(world[i].x, world[i].y, null, null, world[i]);
+    }
+    for (const s of stones) place(s.x, s.y, null, null, null, s);
 
     // Far to near. Nothing can be behind the wall, so this is the entire depth test.
     seen.sort((a, b) => b.depth - a.depth);
@@ -443,7 +494,9 @@ export class FirstPerson {
     const sprites = treeSprites();
     for (const item of seen) {
       const { depth, screenX } = item;
-      const scale = focal / depth;
+      // Sized and placed vertically as if no nearer than MIN_DRAW_DEPTH — see there.
+      // Fog still comes off the TRUE depth: something in your face is not hazy.
+      const scale = focal / Math.max(depth, MIN_DRAW_DEPTH);
       const fog = fogAt(depth);
       /** Screen row of the ground it is standing on — where the shadow goes. */
       const groundY = horizon + eye.height * scale;
@@ -458,6 +511,29 @@ export class FirstPerson {
         ctx.fillStyle = `rgba(0,0,0,${0.24 * (1 - fog)})`;
         ctx.fillRect(Math.round(screenX - shW / 2), Math.round(groundY - Math.max(1, w * 0.09)), shW, Math.max(1, Math.round(w * 0.16)));
         ctx.drawImage(fadedTree(sprites, treeVariant(item.tree.vary), fog), left, topY, w, h);
+        continue;
+      }
+
+      if (item.item || item.stone) {
+        /*
+         * Small things, drawn straight onto the frame at a size rather than blitted
+         * from a sprite. A berry is four pixels at arm's length and one at twenty
+         * paces — there is no detail in it to preserve, so scaling the shapes beats
+         * scaling an image, and it skips a canvas per kind.
+         */
+        const s = Math.max(1, scale);
+        ctx.globalAlpha = 1 - fog;
+        if (item.stone) {
+          // The only thing in the world that is not standing on the ground: a stone
+          // flies at about chest height, which is where it left somebody's hand.
+          paintStone(ctx, screenX, groundY - 7 * scale, s);
+        } else {
+          this.ictx.clearRect(0, 0, ITEM_BOX, ITEM_BOX);
+          paintItem(this.ictx, ITEM_BOX / 2, ITEM_BOX - 1, item.item!.kind);
+          const w = Math.max(1, Math.round(ITEM_BOX * s));
+          ctx.drawImage(this.items, Math.round(screenX - w / 2), Math.round(groundY - w), w, w);
+        }
+        ctx.globalAlpha = 1;
         continue;
       }
 
@@ -478,8 +554,16 @@ export class FirstPerson {
       ctx.fillStyle = `rgba(0,0,0,${(0.3 - lift * 0.15) * (1 - fog)})`;
       ctx.fillRect(Math.round(screenX - shW / 2), Math.round(groundY - shH / 2), shW, shH);
 
+      // Somebody swinging gets a flash of the same warm colour the arc uses from
+      // above, so a fight at eye level is legible as a fight rather than as two
+      // people standing close together.
+      if (p.swing > 0) {
+        ctx.fillStyle = `rgba(255,232,176,${0.3 * (1 - fog)})`;
+        ctx.fillRect(Math.round(screenX - w), Math.round(feetY - BODY_H * scale * 0.7), w * 2, Math.max(1, h * 0.12));
+      }
+
       this.sctx.clearRect(0, 0, BODY_W, SPRITE_H);
-      paintPerson(this.sctx, 0, 0, p.hue, faceToward(p, eye, rightX, rightY), walkFrame(p, time));
+      paintPerson(this.sctx, 0, 0, p.hue, faceToward(p, eye, rightX, rightY), walkFrame(p, time), p.down > 0);
       if (fog > 0.02) {
         // `source-atop` tints the person and not the empty pixels around them, which
         // a rectangle of haze over the billboard would happily also do.

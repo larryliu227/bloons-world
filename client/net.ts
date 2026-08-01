@@ -9,12 +9,15 @@
 
 import { PROTOCOL_VERSION, decode, encode } from '../shared/protocol.js';
 import type { ClientMsg, ServerMsg } from '../shared/protocol.js';
-import type { Player } from '../shared/world.js';
+import type { Player, Stone } from '../shared/world.js';
 
 /** One snapshot, stamped on arrival so remote players can be interpolated. */
 export interface Frame {
   at: number;
   players: Player[];
+  stones: Stone[];
+  /** Indices into the shared item list that are currently picked. */
+  gone: Set<number>;
 }
 
 export type Status = 'offline' | 'connecting' | 'online';
@@ -74,7 +77,12 @@ export class Net {
         return;
       case 'state':
         this.prev = this.last;
-        this.last = { at: performance.now(), players: msg.players };
+        this.last = {
+          at: performance.now(),
+          players: msg.players,
+          stones: msg.stones ?? [],
+          gone: new Set(msg.gone ?? []),
+        };
         return;
       case 'error':
         this.set('offline', msg.message);
@@ -87,6 +95,11 @@ export class Net {
   /** Post the current intent. Dropped rather than queued — a stale input is worse. */
   sendInput(x: number, y: number, jump = false): void {
     this.send({ t: 'input', x, y, jump });
+  }
+
+  /** Swing, or throw a stone, along a bearing in radians. The server does the rest. */
+  attack(kind: 'hit' | 'throw', a: number): void {
+    this.send({ t: kind, a });
   }
 
   rename(name: string): void {

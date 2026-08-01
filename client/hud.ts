@@ -11,7 +11,7 @@
  * same string sixty times a second is layout work in exchange for nothing.
  */
 
-import { MAX_HP } from '../shared/world.js';
+import { MAX_CARRY, MAX_HP, MELEE_DAMAGE, PEBBLE_DAMAGE } from '../shared/world.js';
 import type { Status } from './net.js';
 
 /**
@@ -26,11 +26,16 @@ const TOUCH = window.matchMedia('(hover: none), (pointer: coarse)').matches;
 export class Hud {
   private bar: HTMLElement;
   private pips: HTMLElement[] = [];
+  private ammo: HTMLElement;
+  private stones: HTMLElement[] = [];
+  private downNote: HTMLElement;
   private count: HTMLElement;
   private status: HTMLElement;
   private helpBtn: HTMLButtonElement;
   private help: HTMLElement;
   private shownPips = -1;
+  private shownPebbles = -1;
+  private shownDown = false;
   private shownCount = -1;
   private shownStatus = '';
 
@@ -41,7 +46,8 @@ export class Hud {
     /*
      * Ten pips, because the number is ten. Not a bar that fills — at this size a
      * continuous bar loses its last tenth to rounding, and "how many hits do I have
-     * left" is a counting question rather than a proportion one.
+     * left" is a counting question rather than a proportion one. Which is also why
+     * the stones below are counted the same way: three pips is one swing.
      */
     this.bar = div('health', root);
     for (let i = 0; i < MAX_HP; i++) {
@@ -49,6 +55,17 @@ export class Hud {
       this.bar.appendChild(pip);
       this.pips.push(pip);
     }
+
+    this.ammo = div('ammo', root);
+    for (let i = 0; i < MAX_CARRY; i++) {
+      const stone = document.createElement('i');
+      this.ammo.appendChild(stone);
+      this.stones.push(stone);
+    }
+
+    this.downNote = div('down-note', root);
+    this.downNote.textContent = 'KNOCKED DOWN — GETTING UP';
+    this.downNote.hidden = true;
 
     this.helpBtn = document.createElement('button');
     this.helpBtn.type = 'button';
@@ -69,15 +86,32 @@ export class Hud {
     this.help.querySelector('.help-close')?.addEventListener('click', () => this.toggleHelp());
   }
 
-  /** Fill in pips to match `hp`, rounding up so a scratch is not a whole heart. */
-  setHealth(hp: number): void {
+  /** Fill in pips to match `hp`, rounding up so a scratch is not a whole pip. */
+  setHealth(hp: number, down: boolean): void {
     const lit = Math.max(0, Math.min(MAX_HP, Math.ceil(hp - 0.001)));
-    if (lit === this.shownPips) return;
-    this.shownPips = lit;
-    for (let i = 0; i < this.pips.length; i++) this.pips[i].classList.toggle('on', i < lit);
-    // Below a third the bar starts breathing, so drowning is noticed by somebody
-    // who is looking at the water rather than at the corner of the screen.
-    this.bar.classList.toggle('low', lit > 0 && lit <= 3);
+    if (lit !== this.shownPips) {
+      this.shownPips = lit;
+      for (let i = 0; i < this.pips.length; i++) this.pips[i].classList.toggle('on', i < lit);
+      // Below a third the bar starts breathing, so being nearly out is noticed by
+      // somebody watching the fight rather than the corner of the screen.
+      this.bar.classList.toggle('low', lit > 0 && lit <= 3);
+    }
+    if (down !== this.shownDown) {
+      this.shownDown = down;
+      // There is no death screen, because there is no death. A word and a bar that
+      // has gone out is the whole of it, and it is over in two seconds.
+      this.downNote.hidden = !down;
+    }
+  }
+
+  /** How many stones are in hand, as a row of them. */
+  setPebbles(n: number): void {
+    const have = Math.max(0, Math.min(MAX_CARRY, Math.round(n)));
+    if (have === this.shownPebbles) return;
+    this.shownPebbles = have;
+    for (let i = 0; i < this.stones.length; i++) this.stones[i].classList.toggle('on', i < have);
+    // Nothing to throw is worth saying quietly rather than not at all.
+    this.ammo.classList.toggle('empty', have === 0);
   }
 
   setCount(n: number): void {
@@ -116,6 +150,12 @@ interface Row {
   what: string;
 }
 
+const FIGHTING: Row[] = [
+  { keys: 'F  ·  left click', what: `swing — ${MELEE_DAMAGE} pips, but you have to be right there` },
+  { keys: 'R  ·  right click', what: `throw a stone — ${PEBBLE_DAMAGE} pip, from across a clearing` },
+  { keys: 'aiming', what: 'where you look, or where the mouse is when looking down' },
+];
+
 const LOOKING_DOWN: Row[] = [
   { keys: 'W A S D  ·  arrows', what: 'walk' },
   { keys: 'space', what: 'jump' },
@@ -134,13 +174,16 @@ const IN_WORLD: Row[] = [
 const THUMBS: Row[] = [
   { keys: 'left half', what: 'press anywhere and steer — that spot is the stick' },
   { keys: 'right half', what: 'drag to look, once you are in the world' },
-  { keys: 'JUMP', what: 'the big round one' },
-  { keys: '1ST · TOP', what: 'swap between the two views' },
+  { keys: 'JUMP  ·  HIT  ·  THROW', what: 'the round ones, bottom right' },
+  { keys: '1ST · TOP', what: 'swap views — up in the corner, out of the way' },
 ];
 
 const RULES: Row[] = [
-  { keys: 'water', what: 'slows you and drains your health — dry land gives it back' },
-  { keys: 'trees', what: 'solid. You can slip between them, not through them' },
+  { keys: 'berries', what: `grow in the shade of trees. Walk over one and you eat it, +3 pips` },
+  { keys: 'stones', what: `lie on the sand. Walk over one to pick it up, ${MAX_CARRY} at most` },
+  { keys: 'water', what: 'harmless, and desperately slow. It will not hurt you, just keep you' },
+  { keys: 'trees', what: 'solid, and they stop thrown stones. A wood is cover' },
+  { keys: 'no dying', what: 'run out and you are flat for two seconds, then up again, full' },
   { keys: 'the edge', what: 'a wall. Jump at it and you can just see over' },
 ];
 
@@ -159,6 +202,9 @@ function buildHelp(): HTMLElement {
   head.appendChild(close);
   card.appendChild(head);
 
+  // Fighting first: it is the thing you can do that is least guessable from the
+  // screen, and the only one where not knowing costs you something.
+  card.appendChild(section('FIGHTING', FIGHTING, ''));
   const keyboard = [
     section('LOOKING DOWN AT IT', LOOKING_DOWN, 'top'),
     section('STANDING IN IT', IN_WORLD, 'fp'),

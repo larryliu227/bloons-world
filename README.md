@@ -1,15 +1,16 @@
 # BLOONS WORLD
 
 A pixel world you walk around in, together — grass, lakes and forests, seen from
-above or from inside it.
+above or from inside it. There are berries to eat and stones to throw at each other,
+and nothing in it can kill you.
 
 ```
         ┌──────────────────────────┐                ▁▁▁▁▁☀▁▁▁▁▁▁▁▁
-        │ ♣♣  ~~~~~   ▮      ♣♣♣   │   ▮ else         ♣ ▟▙ ♣♣
-        │ ♣    ~~~~ ▮ you     ♣♣   │        press V   ▝▀▀▘
-        │      ~~~~~~~~     ♣      │   ───────────▶  ░░░░░░░░░░░░░░
+        │ ♣•  ~~~~~   ▮      ♣♣•   │   ▮ else         ♣ ▟▙ ♣♣
+        │ ♣    ~~~~ ▮ you  ·  ♣♣   │        press V   ▝▀▀▘
+        │      ~~~~~~~~·    ♣      │   ───────────▶  ░░░░░░░░░░░░░░
         └──────────────────────────┘                ▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-          64 x 64 tiles · ~ drowns you                 eye level
+       • berries  · stones  ~ very slow                eye level
 ```
 
 ## Play
@@ -30,15 +31,41 @@ that is the last time — and **ENTER WORLD** drops you in.
   hold it, so there is no fixed pad to find and no wrong place to put your thumb. At
   eye level the screen splits: left thumb walks, right thumb looks, and the round
   button above JUMP switches back.
+- **F** or **left click** to swing, **R** or **right click** to throw a stone. From
+  above you aim with the mouse; standing in the world you aim where you look.
 - **?**, or the button in the corner, lists all of it at any time. It is the same
   list on every device and it names both views, so nothing is discoverable only by
   having read this file.
 
-**Deep water drains your health** — the ten pips top-left — and slows you to under
-half speed. Dry land gives it back after a moment's pause, and running out puts you
-back in the middle of the map with a full bar. Six seconds of swimming costs all ten,
-so a lake is a decision and not a wall. Trees are solid: you can slip between them,
-never through, and you cannot jump one.
+## The rules of the place
+
+**Nothing here kills you.** Run out of pips and you are flat on your back for two
+seconds and then get up, full, exactly where you fell — never removed, never
+teleported, never sent back to spawn. A fight is something that happens to you rather
+than something that ends you, and the only thing it costs is standing back up.
+
+The two ways to hit somebody are deliberately not the same weapon:
+
+|  | reach | damage | ten pips is |
+|---|---|---|---|
+| **swing** | right there | 3 | four swings |
+| **thrown stone** | across a clearing | 1 | ten stones, and you carry six |
+
+So a stone is for *bothering* somebody at distance and the swing is what actually
+wins — which means the fight anybody wins is the one they walked into, and the stones
+are for making that walk expensive. Trees stop thrown stones, so a wood is cover.
+
+**Berries** grow in the shade of trees; walk over one and you eat it for three pips,
+and it grows back after a while. **Stones** lie on the sand at the water's edge. The
+two things you need are in two different places on purpose: going to get one is a
+walk somewhere rather than a lap of wherever you already are.
+
+**Water is harmless and desperately slow** — about a tenth of walking pace, so a lake
+you could stroll across in two seconds is a fifteen-second slog. That is its own
+deterrent and a better one than damage: wading is a bad idea you can change your mind
+about halfway through, from either direction. **Bodies are solid**, so you stop at
+each other, but only on the ground — you can jump over somebody, and you can walk
+over somebody who is down. **Trees are solid** at any height.
 
 Vite binds `0.0.0.0`, so anyone on your Wi-Fi joins at `http://<your-lan-ip>:5174`
 and appears next to you. There is no lobby and no room code — one world, everybody
@@ -91,14 +118,20 @@ Two pieces of netcode carry the feel:
 `shared/world.ts` is imported by both sides on purpose. If the two ever disagreed
 about how fast a person walks, every player would rubber-band.
 
-**The map is never sent.** Terrain and trees are a pure function of tile coordinates,
-so the server and every client generate the same lakes and the same forests from the
-code they are already running. A 64x64 map would be a small download, but it would
-also be a thing that can be stale — and terrain that disagrees is terrain you walk
-through on one screen and bump into on another.
+**The map is never sent.** Terrain, trees and where the berries grow are a pure
+function of tile coordinates, so the server and every client generate the same lakes
+and the same forests from the code they are already running. A 64x64 map would be a
+small download, but it would also be a thing that can be stale — and terrain that
+disagrees is terrain you walk through on one screen and bump into on another. What
+*does* travel is which items have been picked: a short list of indices rather than
+three hundred positions twenty times a second.
 
-Health is the exception to prediction: only the server writes it. Being briefly wrong
-about a pixel is invisible; being briefly wrong about whether somebody drowned is not.
+**Fighting is not predicted at all.** The client sends which way it is pointing and
+nothing else — not whether it may attack, not who was in range, not what it cost
+them. A client that could report its own hits could report all of them, and a health
+bar that flickered down and back on every mispredicted swing would be worse than one
+that answers a round trip late. Position is predicted because being briefly wrong
+about a pixel is invisible. Nothing else here is.
 
 ## What was making it shimmer
 
@@ -144,11 +177,18 @@ The picture is made cheaply, in `client/fp.ts`:
 - **The wall around the world is four segments**, and the camera is always inside
   them, so a column's wall distance is one slab test. No DDA, no grid march. Jump and
   your eye clears it, which is the only way to find out there is nothing out there.
-- **Trees and people are billboards**, in one list that sorts together — a person
-  behind a tree has to be behind that tree. Nothing can hide behind the wall, since
-  everything is inside it always, so far-to-near IS the depth test. No z-buffer.
-  Trees are pre-tinted at eight fog strengths and then only ever blitted, because a
-  forest is a couple of hundred of them in a frame.
+- **Trees, people, berries and stones are billboards**, in one list that sorts
+  together — a person behind a tree has to be behind that tree. Nothing can hide
+  behind the wall, since everything is inside it always, so far-to-near IS the depth
+  test. No z-buffer. Trees are pre-tinted at eight fog strengths and then only ever
+  blitted, because a forest is a couple of hundred of them in a frame.
+- **Nothing is drawn as though it were nearer than 21 world pixels.** Bodies stop
+  each other at nine, so the moment you close to swinging distance the true
+  projection magnifies a ten-pixel sprite about thirty times — and that is not a
+  person, it is a flat field of one colour across a third of the screen with the head
+  and the feet both out of frame. Size and height are computed as if anything nearer
+  were exactly at that distance, while its position across the screen stays true. It
+  is a lie, and it is a smaller lie than the alternative.
 
 Sky and fog are the same colour on purpose, so the far edge of the world dissolves
 instead of ending — and since the horizon end of that gradient is the pale one,

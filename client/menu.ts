@@ -66,6 +66,7 @@ export class Menu {
     keys.className = 'menu-keys';
     keys.appendChild(text('p', '', 'WASD or ARROWS to walk · SPACE to jump'));
     keys.appendChild(text('p', '', 'V to stand in it · MOUSE to look'));
+    keys.appendChild(text('p', '', 'F to swing · R to throw a stone'));
     keys.appendChild(text('p', '', 'On a phone, press anywhere to steer'));
     // The short list is the reminder; ? is where the whole thing lives, so nobody
     // has to have read the title screen to find out what the game does.
