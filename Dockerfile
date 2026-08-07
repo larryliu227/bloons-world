@@ -73,7 +73,10 @@ COPY server ./server
 # The built client, served by the same process on the same port.
 COPY --from=build /app/dist ./dist
 
-# `node` (uid 1000) ships with the base image. Nothing here needs to be writable.
+# `node` (uid 1000) ships with the base image. /app has to be writable by it: the
+# server saves every block anybody has changed to `world-edits.json` beside itself.
+# That file is the world, and on a host with an ephemeral filesystem it lasts until
+# the next deploy — point `WORLD_SAVE` at a mounted volume to keep it longer.
 RUN chown -R node:node /app
 USER node
 

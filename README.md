@@ -1,16 +1,17 @@
 # BLOONS WORLD
 
-A pixel world you walk around in, together — grass, lakes and forests, seen from
-above or from inside it. There are berries to eat and stones to throw at each other,
-and nothing in it can kill you.
+A block world you dig, build and stand around in, together. One island, 128 × 64 ×
+128 blocks of it, with caves and ore underneath and a sky over the top — and everybody
+who opens the link is in the same one.
 
 ```
-        ┌──────────────────────────┐                ▁▁▁▁▁☀▁▁▁▁▁▁▁▁
-        │ ♣•  ~~~~~   ▮      ♣♣•   │   ▮ else         ♣ ▟▙ ♣♣
-        │ ♣    ~~~~ ▮ you  ·  ♣♣   │        press V   ▝▀▀▘
-        │      ~~~~~~~~·    ♣      │   ───────────▶  ░░░░░░░░░░░░░░
-        └──────────────────────────┘                ▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-       • berries  · stones  ~ very slow                eye level
+                                    ☀
+        ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+       ▟ ♣♣   ♣♣♣          ♣♣               ▙
+      ▟▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒~~~~~▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▙     grass, sand, sea
+      ███████████░░░███████████████░░░████████     dirt
+      ██▓▓███████░░░██████▒▒▒███████░░█████▓▓██     stone, ore, caves
+      ███████████████████████████████████████     bedrock
 ```
 
 ## Play
@@ -21,58 +22,66 @@ npm run dev
 ```
 
 Open **http://localhost:5174**. The title screen asks your name — it remembers it, so
-that is the last time — and **ENTER WORLD** drops you in.
+that is the last time — and **ENTER WORLD** builds the island and drops you into it.
 
-- **WASD** or **arrow keys** to walk, **SPACE** to jump.
-- **V** to stand in the world instead of looking down at it. Then **mouse** to look
-  (click once for pointer lock; drag if the browser refuses it), **W/S** forward and
-  back, **A/D** to strafe, **←/→** or **Q/E** to turn.
-- On a phone, **press anywhere** — that spot becomes a thumbstick for as long as you
-  hold it, so there is no fixed pad to find and no wrong place to put your thumb. At
-  eye level the screen splits: left thumb walks, right thumb looks, and the round
-  button above JUMP switches back.
-- **F** or **left click** to swing, **R** or **right click** to throw a stone. From
-  above you aim with the mouse; standing in the world you aim where you look.
-- **?**, or the button in the corner, lists all of it at any time. It is the same
-  list on every device and it names both views, so nothing is discoverable only by
-  having read this file.
+| | |
+|---|---|
+| **W A S D** | walk. **SHIFT** to run |
+| **SPACE** | jump — a block and a quarter, so one step up and no more |
+| **mouse** | look. Click once and the cursor is caught; **ESC** gives it back |
+| **hold left** | dig. Harder things take longer — watch the cracks |
+| **right click** | put down whatever is in the selected slot |
+| **middle click** | point at something to hold that kind |
+| **1 … 9**, **wheel** | choose a hotbar slot |
+| **E** | everything you are carrying, and what it can be made into |
+| **?** | all of the above, at any time, on any device |
+
+On a phone, **press anywhere on the left** — that spot becomes a thumbstick for as
+long as you hold it, so there is no fixed pad to find and no wrong place to put your
+thumb. The right half looks around, and **DIG · PUT · JUMP** are the round buttons.
+
+Vite binds `0.0.0.0`, so anyone on your Wi-Fi joins at `http://<your-lan-ip>:5174` and
+appears next to you. There is no lobby and no room code. Nothing connects until you
+press the button — opening the socket on page load would stand you in the world,
+named and motionless, while you were still reading the title.
 
 ## The rules of the place
 
-**Nothing here kills you.** Run out of pips and you are flat on your back for two
-seconds and then get up, full, exactly where you fell — never removed, never
-teleported, never sent back to spawn. A fight is something that happens to you rather
-than something that ends you, and the only thing it costs is standing back up.
+**Nothing kills you.** No falling damage, no drowning, no monsters, no night that
+comes for you. Deep water is slow and dark rather than fatal, and the only thing at
+stake is the walk back. What the world is *for* is building.
 
-The two ways to hit somebody are deliberately not the same weapon:
+**Everything you put down, you dug up first.** Break a block and it goes in your
+pockets; place one and it comes back out. Stone gives cobble, grass gives dirt, and
+the rest give themselves. Bare hands, and the time each block takes is the whole of
+the difficulty curve:
 
-|  | reach | damage | ten pips is |
-|---|---|---|---|
-| **swing** | right there | 3 | four swings |
-| **thrown stone** | across a clearing | 1 | ten stones, and you carry six |
+| | seconds | |
+|---|---|---|
+| tall grass, flowers | instant | |
+| leaves, glass, lamp | ¼ – ½ | |
+| dirt, sand, gravel | ½ – ⅗ | |
+| planks, logs | 1¼ – 1⅗ | |
+| stone, cobble, brick | 3 – 3⅖ | drops **cobble** |
+| coal · iron · gold · diamond | 3⅗ – 5⅗ | deeper is rarer |
+| **bedrock**, **water** | never | the floor of the world, and the sea |
 
-So a stone is for *bothering* somebody at distance and the swing is what actually
-wins — which means the fight anybody wins is the one they walked into, and the stones
-are for making that walk expensive. Trees stop thrown stones, so a wood is cover.
+**Four things can be made**, and the last one is the point of the other three:
 
-**Berries** grow in the shade of trees; walk over one and you eat it for three pips,
-and it grows back after a while. **Stones** lie on the sand at the water's edge. The
-two things you need are in two different places on purpose: going to get one is a
-walk somewhere rather than a lap of wherever you already are.
+```
+1 log              →  4 planks
+4 cobble           →  4 brick
+2 sand + 1 coal    →  2 glass
+2 glass + 2 coal   →  1 lamp     ← the only light you can carry
+```
 
-**Water is harmless and desperately slow** — about a tenth of walking pace, so a lake
-you could stroll across in two seconds is a fifteen-second slog. That is its own
-deterrent and a better one than damage: wading is a bad idea you can change your mind
-about halfway through, from either direction. **Bodies are solid**, so you stop at
-each other, but only on the ground — you can jump over somebody, and you can walk
-over somebody who is down. **Trees are solid** at any height.
+Coal is in the stone almost anywhere; sand is on the beach; so the first lamp is a
+walk to the shore and a dig, and after that a cave is somewhere you can see. **E**
+opens the list; a recipe you can afford is the only one that looks like a button.
 
-Vite binds `0.0.0.0`, so anyone on your Wi-Fi joins at `http://<your-lan-ip>:5174`
-and appears next to you. There is no lobby and no room code — one world, everybody
-in it.
-
-Nothing connects until you press the button. Opening the socket on page load would
-stand you at spawn, named and motionless, while you were still reading the title.
+**The day is twelve minutes long** and it is the same time of day for everybody. The
+sun rises in the east, the stars come out properly after it has gone, and a lamp is
+worth having at both ends of it.
 
 ## Deploy
 
@@ -86,143 +95,152 @@ npm start          # one port serves the built client AND the WebSocket
 On **Render**: push this repo to GitHub, then Dashboard → New → Blueprint → pick it.
 `render.yaml` builds the `Dockerfile` and hands back an `https://` URL; WebSockets
 work on every plan including free. The client derives its socket URL from the page
-origin (`https:` → `wss:`), so there is no host to configure in dev, in production,
-or on a phone.
+origin (`https:` → `wss:`), so there is no host to configure in dev, in production, or
+on a phone.
 
-Keep it at one instance. The world is this process's memory — a second instance is a
-second, invisible world, and two people on the same link would not see each other.
+Keep it at **one instance**. The world is this process's memory — a second instance is
+a second island, and two people on the same link would not see each other.
+
+Everything anybody digs or builds is written to `world-edits.json` every twenty
+seconds and on shutdown, and read back on boot, so a restart does not flatten the
+place. `WORLD_SAVE` moves the file; `WORLD_TIME=0.9` pins the clock, which is the only
+way to look at the stars without waiting six minutes for them.
 
 ## How it works
 
-Authoritative server at 20 Hz. The client sends **intent** — "I am pushing
-north-east" — never a position, so a client cannot put itself somewhere the server
-disagrees with, and clamping that vector is the whole anti-cheat surface of a
-walking game.
-
 ```
-shared/   world.ts (walking, terrain, trees, health), protocol.ts (the wire)
-server/   http + ws on one port, the 20 Hz loop
-client/   the title screen, two renderers, the art, input, the HUD, the socket
+shared/   blocks.ts   what a block IS — solid, opaque, hard, what it drops
+          world.ts    generation, storage, light, raycasting, walking
+          protocol.ts the wire
+server/   http + ws on one port, the 20 Hz loop, the save file
+client/   gl.ts     matrices, shaders, frustum          atlas.ts  the textures
+          mesh.ts   blocks → triangles                  render.ts WebGL2, five programs
+          input.ts  keys, mouse, thumbs                 hud.ts    hotbar, pockets, help
+          main.ts   the loop and the netcode            net.ts    the socket
 ```
 
-Two pieces of netcode carry the feel:
+**Node + TypeScript + `ws` + Vite. One runtime dependency**, and it is the WebSocket
+server. There is no graphics library, no maths library, no physics library and no
+image files: the renderer is about five hundred lines of WebGL2, `mat4` is ninety
+lines because a voxel world needs nine matrix operations, and every texture in the
+game is drawn by a function at load time.
 
-- **You are predicted locally.** Waiting a round trip to start walking feels broken
-  on any connection, so the client runs the *same* `step` the server runs and eases
-  the server's answer in rather than snapping to it. A disagreement over 24 pixels is
-  accepted outright; anything smaller closes over a few frames and is invisible.
-- **Everyone else is interpolated**, held 100 ms behind the newest snapshot so there
-  is always a pair of frames to interpolate between. Drawing them at the very latest
-  position instead means stuttering on every late packet.
+### The map is never sent
 
-`shared/world.ts` is imported by both sides on purpose. If the two ever disagreed
-about how fast a person walks, every player would rubber-band.
+Terrain, caves, ore, trees and flowers are a pure function of block coordinates. The
+server and every client generate the same island from nothing but the code they are
+already running — a million blocks, in about a third of a second, behind the title
+screen.
 
-**The map is never sent.** Terrain, trees and where the berries grow are a pure
-function of tile coordinates, so the server and every client generate the same lakes
-and the same forests from the code they are already running. A 64x64 map would be a
-small download, but it would also be a thing that can be stale — and terrain that
-disagrees is terrain you walk through on one screen and bump into on another. What
-*does* travel is which items have been picked: a short list of indices rather than
-three hundred positions twenty times a second.
+A megabyte is not a large download, but it is a thing that can be *stale*, and terrain
+that disagrees is terrain you walk through on one screen and bump into on another.
+What travels instead is the **difference**: every block anybody has changed since the
+server started, as a flat `[index, block, …]`. That is a few thousand numbers instead
+of a million, it is the save file as well as the join payload, and an entry is deleted
+rather than written when a block goes back to what the generator would have made — so
+filling a hole in makes the world forget you dug it.
 
-**Fighting is not predicted at all.** The client sends which way it is pointing and
-nothing else — not whether it may attack, not who was in range, not what it cost
-them. A client that could report its own hits could report all of them, and a health
-bar that flickered down and back on every mispredicted swing would be worse than one
-that answers a round trip late. Position is predicted because being briefly wrong
-about a pixel is invisible. Nothing else here is.
+### Two predictions, and one deliberate refusal
 
-## What was making it shimmer
+- **Walking is predicted.** The client runs the *same* `step` the server runs and
+  eases the server's answer in rather than snapping to it. `shared/world.ts` is
+  imported by both sides for exactly this reason: if the two ever disagreed about how
+  fast a person walks, everybody would rubber-band.
+- **Digging is predicted**, and that is a different bet. The block goes the instant
+  the timer finishes and the server is told after; if it disagrees it sends back what
+  is actually there and the block reappears. A visible correction in the rare case
+  beats a round trip of lag in the common one.
+- **The inventory is not predicted at all.** Being briefly wrong about a pixel is
+  invisible. Being briefly wrong about whether you have four planks or three is the
+  sort of thing people notice and remember.
 
-Three separate things, none of which was the frame rate:
+The client sends **intent** — "forward, and to my right, looking that way" — never a
+position. Clamping those three numbers is most of the anti-cheat surface of a walking
+game; the rest is the server refusing digs that arrive faster than the block allows,
+builds out of reach, and builds into somebody who is standing there.
 
-- **The camera was rounded to whole world pixels.** Walking is 78 px/s and a world
-  pixel is four or five screen pixels, so the entire scene lurched sideways five
-  pixels at a time, about sixteen times a second. Now the scene is drawn at the
-  whole-pixel camera and the canvas *element* is slid by the leftover, rounded to
-  whole **device** pixels — every texel still lands exactly on the screen grid, and
-  the step shrinks by the scale times the pixel ratio. Measured: 1 CSS pixel per step
-  instead of 3 on a 1x display, and a third of that on a phone.
-- **Reconciliation was per frame, not per second.** A flat 12% of the error each
-  frame meant a 144 Hz screen corrected two and a half times faster than a 60 Hz one,
-  and a dropped frame corrected less. It is exponential decay over real elapsed time
-  now, so every machine gets the same curve.
-- **Remote players were interpolated against packet arrival times**, which are
-  exactly as jittery as the network. There is a render clock now: it advances at real
-  time and is only gently pulled toward what the snapshots say, so a late packet
-  spends a moment being a few milliseconds wrong instead of being right in a way you
-  can see.
+### Light
 
-The resolution went up at the same time, which shrinks whatever is left: the view is
-whatever fits the window inside 460x300 world pixels, at the largest whole scale that
-does it. Both axes come from the window, so a phone in portrait gets a portrait
-viewport rather than black bars.
+Two channels in one byte: sunlight in the high nibble, lamplight in the low one. They
+are kept apart because they behave differently at dusk — the sun goes out and a lamp
+does not — and a renderer with a single number could not tell "this cave is dark" from
+"it is night outside".
 
-## The two views
+Sunlight **falls straight down at full strength** and loses a level for every step it
+takes sideways. That one asymmetry is the whole look of the thing: it is what puts a
+shaft of daylight down a hole you dug, and what makes the inside of a doorway darker
+than the outside of it.
 
-**First person is a camera and a control mapping, and nothing else.** There is no
-second simulation and no second protocol. `main` folds "forward, and to my right"
-back into the same world-space intent vector the top-down view sends, so both views
-put identical traffic on the wire — the server cannot tell them apart, and neither
-can anybody else's screen. Which view you are in is not even a thing the game knows
-about you.
+Changing a block does not relight the world. It runs the standard two-phase flood: one
+sweep takes away everything that was lit *by* the cell that changed, collecting the
+neighbours that were lit by something else as it goes, and those then pour back in.
+Twelve blocks dug out of a hillside relight in a third of a millisecond. Ten thousand
+blocks arriving at join time do not use it at all — they are applied raw and the whole
+world is lit once, because ten thousand incremental updates is about four orders of
+magnitude more work than one full pass.
 
-The picture is made cheaply, in `client/fp.ts`:
+### Turning blocks into triangles
 
-- **The floor is cast, not projected.** Every screen row below the horizon is a fixed
-  distance away, so one divide gives that distance and the world position then steps
-  linearly across the row — the ground is a texture read per pixel with no geometry
-  at all. It samples the *same* baked grass the top-down view blits.
-- **The wall around the world is four segments**, and the camera is always inside
-  them, so a column's wall distance is one slab test. No DDA, no grid march. Jump and
-  your eye clears it, which is the only way to find out there is nothing out there.
-- **Trees, people, berries and stones are billboards**, in one list that sorts
-  together — a person behind a tree has to be behind that tree. Nothing can hide
-  behind the wall, since everything is inside it always, so far-to-near IS the depth
-  test. No z-buffer. Trees are pre-tinted at eight fog strengths and then only ever
-  blitted, because a forest is a couple of hundred of them in a frame.
-- **Nothing is drawn as though it were nearer than 21 world pixels.** Bodies stop
-  each other at nine, so the moment you close to swinging distance the true
-  projection magnifies a ten-pixel sprite about thirty times — and that is not a
-  person, it is a flat field of one colour across a third of the screen with the head
-  and the feet both out of frame. Size and height are computed as if anything nearer
-  were exactly at that distance, while its position across the screen stays true. It
-  is a lie, and it is a smaller lie than the alternative.
+A chunk is 16³ and becomes one draw call. Only faces with something see-through on the
+other side are built at all, so a solid hillside costs nothing, and the shading is
+baked into the vertices — the fragment shader does no lighting work.
 
-Sky and fog are the same colour on purpose, so the far edge of the world dissolves
-instead of ending — and since the horizon end of that gradient is the pale one,
-distance washes things out rather than dimming them, which is what haze does and the
-only version of it that agrees with there being a sun up there. The sun is the one
-fixed thing in a world with no landmarks; without something in the sky to steer by,
-turning around at eye level loses you completely.
+**The vertex is sixteen bytes**: three floats of position and one packed integer
+holding the texture layer, which corner of the quad this is, which way the face points,
+both light levels and the corner shadow. Twenty-three bits of thirty-two. The UV is
+*not* in there, because every quad is one whole texture and which corner you are tells
+the shader where in the image you belong.
 
-The one thing it gives up: your look direction is not on the wire. Only the four-way
-facing the simulation already sets from movement is, so standing still and turning on
-the spot is invisible to everybody else. Putting a yaw in `Player` would fix that and
-buy a versioned protocol and a new desync surface for a detail on a 10-pixel sprite.
+Every chunk in the world shares **one index buffer**. Every quad is four vertices split
+the same way, so the indices are the same numbers for all of them, forever. The one
+thing that varies — which diagonal a quad is cut along, which has to follow the corner
+shadowing or a wall of identical blocks grows a herringbone pattern — is handled by
+rotating which vertex the mesher emits first.
 
-## Art
+Faces are shaded by **which way they point and nothing else**: no normals, no light
+direction, no dot products. Top full, bottom half, and the two horizontal axes
+deliberately different so a corner has an edge in it. It is the oldest trick in the
+genre and it is the reason a stack of identical grey cubes reads as cubes.
 
-There are no assets. Every sprite is a handful of `fillRect` calls at 1x, scaled up
-by a whole number with smoothing off — which is what actually makes something look
-like pixel art. The whole map is baked once into an offscreen canvas rather than
-redrawn four thousand tiles a frame, and `client/art.ts` hands the same canvas to
-both views, so there is exactly one grass texture and one tree in the program. Two
-copies would drift, and then the two views would be two worlds.
+Textures go into a **2D array texture** rather than an atlas. With mipmapping on, an
+atlas bleeds each tile into the one beside it and every distant block grows a
+one-pixel rind of its neighbour's colour; an array texture has no neighbours to bleed
+from. Magnification is `NEAREST`, because a block up close should be sixteen fat
+pixels — but minification is mipmapped and anisotropic, because a field of grass a
+hundred blocks away without it is a sheet of crawling static.
 
-The ground is painted in **8-pixel blocks shaded from a smooth noise field**, not in
-16-pixel tiles shaded from a per-tile hash. That is not a detail: the eye finds a
-tile-sized patchwork instantly and then cannot stop seeing it, and a lake shaded
-per tile is a checkerboard. Water depth is likewise averaged over a 5x5 neighbourhood
-and read back bilinearly, which turns the same numbers into a gradient from the
-shallows out to the deep. Foam is the one thing drawn per tile, because it *should*
-follow the tile edge — that bright line is exactly where the water starts hurting.
+### The sky is one triangle
 
-Trees have a minimum spacing enforced at generation, which is a collision decision
-rather than an aesthetic one. Two trunks closer together than two bodies' clearance
-give a squeezed player no position that satisfies both, and the push-out solver then
-spends its passes shoving them back and forth. Thinning those pairs out when the
-forest is grown is the fix; solving an impossible position at run time is not.
+No geometry, no dome, no cubemap. One triangle covering the screen, and for each pixel
+the ray through it is recovered by pushing the far plane back through the inverse of
+the view-projection. Gradient, sun, moon, stars and clouds all fall out of that
+direction — and the clouds are a real projection onto a flat sheet a long way up,
+which is why they slide past overhead and pile up towards the horizon.
 
-Stack: Node + TypeScript + `ws` + Vite + Canvas2D. One runtime dependency.
+Underwater, the sky is painted in the water's own colour. Water only builds the faces
+that touch something else, so from inside a lake there is a clear line of sight out
+through the side of it, and a sunset with stars in it came through it.
+
+## Things that were wrong, and what they taught
+
+- **Walking into a wall was faster than walking in the open.** Stopping a body used
+  `Math.ceil` where it needed `Math.floor`, which names the *far* side of the block you
+  hit — so a blocked step teleported you a whole block forward, through the wall.
+  Invisible in open ground, because the branch never runs there. Found by a probe that
+  measured blocks-per-second against a wall.
+- **Leaning on the space bar climbed into the sky.** `onGround` was only cleared when
+  falling, so on the way *up* out of a jump the flag was still set from the last
+  landing and the next substep launched again.
+- **The jump was a different height on every machine.** `y += vy * dt` makes the peak
+  depend on the frame rate: 1.35 blocks at 144 Hz, 1.20 at the server's 20 Hz. Which
+  means the client predicts a jump the server never gives it. Averaging the speed
+  across the step is exact for constant acceleration and identical everywhere — and
+  then the impulse has to be applied *before* the average is taken, or every jump
+  quietly loses its first half-step and clears 1.05 blocks instead of 1.26.
+- **The island was all coastline.** Value noise piles up around its middle and almost
+  never reaches 0 or 1, so every square metre came out within a few blocks of sea
+  level. Stretching the distribution about its centre is one line and it is the
+  difference between an island and a beach.
+- **Stars came out while the sun was still setting.** Measuring nightfall from the
+  horizon rather than from well below it put four fifths of a starfield above a sun
+  that was visibly still up.

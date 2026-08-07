@@ -1,153 +1,115 @@
 /**
- * BLOONS WORLD — the shared rules of the place.
+ * BLOONS WORLD — the world, and the rules of standing in it.
  *
  * Everything in here is imported by BOTH the server and the client, because the
  * client predicts its own movement locally and the server integrates the same
- * numbers authoritatively. If the two ever disagree about how fast a person walks,
- * every player rubber-bands. One file, one answer.
+ * numbers authoritatively. If the two ever disagree about how fast a person walks or
+ * how high a jump goes, every player rubber-bands. One file, one answer.
  *
- * That now includes the LAND. The map is not data and is never sent: it is a pure
- * function of tile coordinates, so the server and every client generate the same
- * lakes and the same forests from nothing but the code they are already running.
- * A 64x64 map would be a small download, but it would also be a thing that can be
- * out of date, and terrain that disagrees is terrain you walk through on one screen
- * and bump into on another.
+ * That includes the LAND, and it is the single most important decision in the
+ * project. The map is not data and is never sent: it is a pure function of block
+ * coordinates, so the server and every client generate the same hills, the same
+ * caves, the same ore and the same trees from nothing but the code they are already
+ * running. A million blocks is a megabyte and a megabyte is a download people wait
+ * for; it is also a thing that can be out of date, and terrain that disagrees is
+ * terrain you walk through on one screen and bump into on another.
+ *
+ * What DOES travel is the difference: every block anybody has dug out or put down
+ * since the server started. That is a few thousand numbers rather than a million,
+ * and it is the only part of the world that could not have been worked out from
+ * first principles.
  */
 
-/** Pixels per world tile. The art is drawn at this scale and never smoothed. */
-export const TILE = 16;
-
-/** World size in tiles. Small enough to run into each other, big enough to wander. */
-export const WORLD_W = 64;
-export const WORLD_H = 64;
-
-export const WORLD_PX_W = WORLD_W * TILE;
-export const WORLD_PX_H = WORLD_H * TILE;
-
-/** Walking speed, pixels per second. */
-export const WALK_SPEED = 78;
-
-/**
- * Jumping. Up at JUMP_SPEED, pulled back down at GRAVITY.
- *
- * Tuned together rather than separately: peak height is v^2/2g and airtime is 2v/g,
- * so these two numbers mean "about 23 pixels up, in about six-tenths of a second" —
- * roughly twice a person's own height, and slow enough to see at the top.
- *
- * You keep full control of your feet in the air. A jump you cannot steer reads as a
- * stumble rather than a hop.
- */
-export const JUMP_SPEED = 150;
-export const GRAVITY = 480;
-
-/** How wide a person is, for keeping them inside the world. */
-export const BODY_W = 10;
-export const BODY_H = 12;
-
-/** Authoritative ticks per second, and how often the client posts its input. */
-export const TICK_RATE = 20;
-export const TICK_MS = 1000 / TICK_RATE;
-export const INPUT_RATE = 20;
-
-/**
- * How far behind the newest snapshot remote players are drawn.
- *
- * Rendering other people at the very latest position means stuttering every time a
- * packet is late. Holding them one tick in the past means there is always a pair of
- * snapshots to interpolate between, and the cost is 50ms of lag on somebody else's
- * position — which nobody can perceive and everybody prefers to jitter.
- */
-export const INTERP_DELAY_MS = 100;
+import {
+  AIR,
+  BEDROCK,
+  BLOCKS,
+  COAL_ORE,
+  DIAMOND_ORE,
+  DIRT,
+  FLOWER,
+  GOLD_ORE,
+  GRASS,
+  GRAVEL,
+  IRON_ORE,
+  LEAVES,
+  LOG,
+  SAND,
+  STONE,
+  TALL_GRASS,
+  WATER,
+  blockDef,
+} from './blocks.js';
 
 // ---------------------------------------------------------------------------
-// Health, and the fact that NOTHING HERE KILLS YOU
+// How big it is
 //
-// Run out of pips and you are knocked flat for a couple of seconds and then get up,
-// full, exactly where you fell. You are never removed from the world, never
-// teleported, and never lose your place. A fight is something that happens to you
-// rather than something that ends you, and the only thing at stake is standing back
-// up. There is no death in this file and no respawn-on-death anywhere in the server.
+// A FIXED world rather than an endless one, and that is a choice rather than a
+// shortcut. Endless terrain means streaming, which means chunk requests, which means
+// the map becomes something the server sends after all — and it means you never meet
+// anybody, because two people in an infinite world are two people alone. This is an
+// island. You can walk to the edge of it in ninety seconds and everybody you can see
+// is in the same square kilometre of blocks as you.
 
-/** Ten pips, because the bar shows ten pips. */
-export const MAX_HP = 10;
-/** How long you spend on the ground after the last pip goes. */
-export const KNOCKDOWN_MS = 2400;
-/** One berry, in pips. */
-export const BERRY_HEAL = 3;
+/** Blocks along a chunk's edge. Sixteen, for the same reason everybody uses sixteen. */
+export const CHUNK = 16;
 
-/*
- * The two ways to hit somebody, and they are deliberately not the same weapon.
+export const WORLD_X = 128;
+export const WORLD_Y = 64;
+export const WORLD_Z = 128;
+
+export const CHUNKS_X = WORLD_X / CHUNK;
+export const CHUNKS_Y = WORLD_Y / CHUNK;
+export const CHUNKS_Z = WORLD_Z / CHUNK;
+export const CHUNK_COUNT = CHUNKS_X * CHUNKS_Y * CHUNKS_Z;
+
+/** Where the sea stops. Everything below this that can see the sky is wet. */
+export const SEA_LEVEL = 26;
+
+const CELLS = WORLD_X * WORLD_Y * WORLD_Z;
+
+/**
+ * Cells are stored COLUMN-major: y varies fastest, then z, then x.
  *
- * A thrown pebble takes ONE pip. It reaches across a clearing, but a whole bar is
- * ten of them and you can only carry six, so it is a way of BOTHERING somebody at
- * distance rather than a way of finishing them. Getting close takes three. The fight
- * anybody actually wins is the one they walked into, and the stones are for making
- * that walk expensive.
+ * Which is unusual, and deliberate. The two loops that touch every cell in the world
+ * — generating the terrain and pouring sunlight down it — both walk a column at a
+ * time, top to bottom. In this order a column is sixty-four consecutive bytes and
+ * both loops run down a cache line instead of across a megabyte.
  */
-export const PEBBLE_DAMAGE = 1;
-export const MELEE_DAMAGE = 3;
-/** How far a swing reaches from the middle of you, and how wide it is in front. */
-export const MELEE_RANGE = 15;
-export const MELEE_ARC = (110 * Math.PI) / 180;
-/** Seconds between swings, and between throws. */
-export const MELEE_COOLDOWN = 0.55;
-export const THROW_COOLDOWN = 0.35;
-/** How long a swing stays drawn, so everybody sees it land. */
-export const SWING_MS = 220;
-
-// ---------------------------------------------------------------------------
-// Terrain
-
-export const GRASS = 0;
-export const SAND = 1;
-export const WATER = 2;
-export type Terrain = 0 | 1 | 2;
-
-/**
- * How fast you move over each kind of ground.
- *
- * Water does not hurt anybody — it just takes forever. At an eighth of walking pace
- * a lake you could stroll across in two seconds is a fifteen-second slog, which is
- * its own deterrent and a much better one than damage: wading is a bad idea you can
- * change your mind about halfway through, from either direction.
- */
-export const SPEED_OF: Record<Terrain, number> = { 0: 1, 1: 0.88, 2: 0.13 };
-
-/**
- * How close two people can stand. Just under a body's width, so they touch and stop
- * rather than sliding a visible gap apart.
- */
-export const PLAYER_R = 9;
-
-/** Trunk radius. Wide enough to be a real obstacle, narrow enough to slip between. */
-export const TREE_R = 5;
-
-/**
- * How far apart two trunks must stand. Slightly more than two bodies' worth of
- * clearance, so there is always a position that satisfies every tree at once —
- * see the note where it is enforced.
- */
-export const MIN_TREE_GAP = 2 * (TREE_R + BODY_W / 2 - 1) + 0.5;
-
-export interface Tree {
-  /** Pixel position of the base of the trunk. */
-  x: number;
-  y: number;
-  tx: number;
-  ty: number;
-  /** 0..1, so no two trees in a stand are quite the same size. */
-  vary: number;
+export function idx(x: number, y: number, z: number): number {
+  return (x * WORLD_Z + z) * WORLD_Y + y;
 }
 
-/**
- * A 32-bit integer hash. `Math.imul` rather than `*` on purpose: plain
- * multiplication of two 32-bit numbers overflows past what a double holds exactly,
- * and terrain that depends on rounding is terrain that could differ between two
- * machines. This stays exact 32-bit arithmetic everywhere.
- */
-function hash(x: number, y: number): number {
+export function inWorld(x: number, y: number, z: number): boolean {
+  return x >= 0 && y >= 0 && z >= 0 && x < WORLD_X && y < WORLD_Y && z < WORLD_Z;
+}
+
+/** Pull a packed index apart again. Used on the wire and nowhere hot. */
+export function unpackIndex(i: number): { x: number; y: number; z: number } {
+  const y = i % WORLD_Y;
+  const rest = (i - y) / WORLD_Y;
+  return { x: (rest / WORLD_Z) | 0, y, z: rest % WORLD_Z };
+}
+
+// ---------------------------------------------------------------------------
+// Noise
+//
+// A 32-bit integer hash and value noise on top of it. `Math.imul` rather than `*` on
+// purpose: plain multiplication of two 32-bit numbers overflows past what a double
+// holds exactly, and terrain that depends on rounding is terrain that could differ
+// between two machines. This stays exact 32-bit arithmetic everywhere, which is what
+// lets the map be generated rather than sent.
+
+function hash2(x: number, y: number): number {
   let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263)) | 0;
   h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+function hash3(x: number, y: number, z: number): number {
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(z, 1442695041)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = Math.imul(h ^ (h >>> 15), 2246822519);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
@@ -155,498 +117,1044 @@ function smoothstep(t: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/** Value noise: a lattice of hashes with a smooth ramp between them. */
-function noise(x: number, y: number): number {
+function noise2(x: number, y: number): number {
   const x0 = Math.floor(x);
   const y0 = Math.floor(y);
   const fx = smoothstep(x - x0);
   const fy = smoothstep(y - y0);
-  const top = hash(x0, y0) + (hash(x0 + 1, y0) - hash(x0, y0)) * fx;
-  const bot = hash(x0, y0 + 1) + (hash(x0 + 1, y0 + 1) - hash(x0, y0 + 1)) * fx;
+  const a = hash2(x0, y0);
+  const b = hash2(x0 + 1, y0);
+  const c = hash2(x0, y0 + 1);
+  const d = hash2(x0 + 1, y0 + 1);
+  const top = a + (b - a) * fx;
+  const bot = c + (d - c) * fx;
   return top + (bot - top) * fy;
 }
 
-/**
- * Ground height, 0..1ish. Two octaves: the coarse one decides where the lakes are,
- * the fine one keeps their shorelines from being smooth blobs.
- *
- * The middle of the map is lifted, because everybody spawns there. Nothing here can
- * hurt you, but arriving in the middle of a lake still means the first ten seconds
- * of the game are spent wading out of one at a tenth of walking pace.
- */
-function elevation(tx: number, ty: number): number {
-  const base = noise(tx / 13, ty / 13) * 0.68 + noise(tx / 5.5, ty / 5.5) * 0.32;
-  const d = Math.hypot(tx - WORLD_W / 2, ty - WORLD_H / 2);
-  return base + Math.max(0, 1 - d / 8) * 0.4;
+function noise3(x: number, y: number, z: number): number {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const z0 = Math.floor(z);
+  const fx = smoothstep(x - x0);
+  const fy = smoothstep(y - y0);
+  const fz = smoothstep(z - z0);
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+  const n000 = hash3(x0, y0, z0);
+  const n100 = hash3(x0 + 1, y0, z0);
+  const n010 = hash3(x0, y0 + 1, z0);
+  const n110 = hash3(x0 + 1, y0 + 1, z0);
+  const n001 = hash3(x0, y0, z0 + 1);
+  const n101 = hash3(x0 + 1, y0, z0 + 1);
+  const n011 = hash3(x0, y0 + 1, z0 + 1);
+  const n111 = hash3(x0 + 1, y0 + 1, z0 + 1);
+  const a = lerp(lerp(n000, n100, fx), lerp(n010, n110, fx), fy);
+  const b = lerp(lerp(n001, n101, fx), lerp(n011, n111, fx), fy);
+  return lerp(a, b, fz);
 }
 
-let terrainCache: Uint8Array | null = null;
-let treeCache: Tree[] | null = null;
-let treeAtTile: Int32Array | null = null;
+// ---------------------------------------------------------------------------
+// The blocks
 
-function build(): void {
-  if (terrainCache) return;
-  const t = new Uint8Array(WORLD_W * WORLD_H);
-  for (let ty = 0; ty < WORLD_H; ty++) {
-    for (let tx = 0; tx < WORLD_W; tx++) {
-      const e = elevation(tx, ty);
-      t[ty * WORLD_W + tx] = e < 0.3 ? WATER : e < 0.36 ? SAND : GRASS;
+/** One byte per cell. This is the world. */
+const blocks = new Uint8Array(CELLS);
+/**
+ * The world as it came out of the generator, before anybody touched it.
+ *
+ * Kept so that reconnecting is `blocks.set(pristine)` and then replaying the
+ * server's edit list, rather than a minute of regeneration. It also means a client
+ * that reconnects to a RESTARTED server — one whose edits are gone — ends up with
+ * exactly the world the server has, instead of keeping ghosts of the old one.
+ */
+const pristine = new Uint8Array(CELLS);
+/** High nibble is skylight, low nibble is light from lamps. See the lighting note. */
+const light = new Uint8Array(CELLS);
+
+let generated = false;
+
+/** Ground height for a column: the y of the topmost solid block the generator makes. */
+export function heightAt(x: number, z: number): number {
+  /*
+   * Value noise piles up around its middle — a lattice of random numbers with a
+   * smooth ramp between them almost never gets near 0 or 1. Left alone that makes
+   * every square metre of the map within a few blocks of sea level: all coastline,
+   * no ocean and no highland. Stretching the distribution about its centre is one
+   * line and it is the difference between an island and a beach.
+   */
+  const raw = noise2(x / 70 + 11.3, z / 70 + 3.7);
+  const cont = Math.max(0, Math.min(1, (raw - 0.5) * 1.9 + 0.5));
+  const hills = noise2(x / 26 + 77.1, z / 26 + 41.9);
+  const fine = noise2(x / 9 + 5.5, z / 9 + 91.2);
+  // Only the very top of the continent field becomes mountains, so peaks are rare
+  // and the rest of the map stays walkable rather than being a field of spikes.
+  const peak = Math.max(0, cont - 0.72) * 26;
+  const h = 10 + cont * 24 + hills * 7 + fine * 3 + peak;
+  return Math.max(2, Math.min(WORLD_Y - 9, Math.round(h)));
+}
+
+/** True where the generator hollows the rock out. */
+function isCave(x: number, y: number, z: number): boolean {
+  if (y < 2) return false;
+  /*
+   * Two ridged noise fields, and a cave only where BOTH are near their middle. One
+   * field on its own carves sheets — great swiss-cheese planes you fall through for
+   * ten seconds. The intersection of two of them is a tunnel: a line rather than a
+   * surface, which is what a cave actually is.
+   */
+  const a = noise3(x / 17, y / 11, z / 17);
+  const b = noise3(x / 17 + 31.1, y / 11 + 7.3, z / 17 + 13.9);
+  return Math.abs(a - 0.5) < 0.058 && Math.abs(b - 0.5) < 0.075;
+}
+
+/** What ore, if any, belongs in the stone at this cell. */
+function oreAt(x: number, y: number, z: number): number {
+  // Blobs rather than single cells: a vein you can follow is worth digging toward,
+  // and a lone speck of diamond in a wall is just noise you happen to have found.
+  if (y < 13 && noise3(x / 2.4 + 401, y / 2.4 + 17, z / 2.4 + 55) > 0.895) return DIAMOND_ORE;
+  if (y < 22 && noise3(x / 2.6 + 211, y / 2.6 + 63, z / 2.6 + 9) > 0.872) return GOLD_ORE;
+  if (y < 36 && noise3(x / 2.8 + 97, y / 2.8 + 5, z / 2.8 + 143) > 0.845) return IRON_ORE;
+  if (noise3(x / 3.1 + 19, y / 3.1 + 71, z / 3.1 + 233) > 0.815) return COAL_ORE;
+  return AIR;
+}
+
+/**
+ * Build the world. Idempotent and lazy — whoever needs a block first pays for it.
+ *
+ * On a laptop this is about a third of a second, once, and it happens behind the
+ * title screen on the client and before the first socket on the server. It is not
+ * fast code and it does not need to be: it runs exactly once per process.
+ */
+export function generate(): void {
+  if (generated) return;
+  generated = true;
+
+  for (let x = 0; x < WORLD_X; x++) {
+    for (let z = 0; z < WORLD_Z; z++) {
+      const h = heightAt(x, z);
+      // A beach is a surface that is barely above the water, not a surface that is
+      // near the water — which is why this is a height test and not a distance one.
+      const beach = h <= SEA_LEVEL + 2;
+      const col = (x * WORLD_Z + z) * WORLD_Y;
+      for (let y = 0; y <= h; y++) {
+        let b: number;
+        if (y === 0) b = BEDROCK;
+        else if (isCave(x, y, z)) b = AIR;
+        else if (y === h) b = beach ? SAND : GRASS;
+        else if (y > h - 4) b = beach ? SAND : DIRT;
+        else {
+          const ore = oreAt(x, y, z);
+          b = ore !== AIR ? ore : STONE;
+        }
+        blocks[col + y] = b;
+      }
+      /*
+       * The sea. Only ABOVE the generated surface, which is what keeps the ocean out
+       * of the caves: a cavern forty blocks inland is below sea level too, and
+       * filling every air cell under y=26 would drown the entire underground.
+       */
+      for (let y = h + 1; y <= SEA_LEVEL; y++) blocks[col + y] = WATER;
+      // Sand under the shallows, so a lake bottom is not a grass lawn seen through
+      // two metres of blue.
+      if (h < SEA_LEVEL && blocks[col + h] === GRASS) blocks[col + h] = SAND;
+      // A little gravel where the water is deepest, for something to find down there.
+      if (h < SEA_LEVEL - 4 && hash2(x + 5501, z + 991) < 0.22) blocks[col + h] = GRAVEL;
     }
   }
-  terrainCache = t;
+
+  plantTrees();
+  scatterPlants();
+  pristine.set(blocks);
+  relightAll();
+}
+
+/**
+ * Trees, in stands rather than sprinkled evenly.
+ *
+ * The world is walked in five-by-five cells and each cell grows at most one tree, at
+ * a spot inside itself chosen by hash. That guarantees the spacing — no two trunks
+ * can ever end up adjacent — without the generator having to look at what it already
+ * planted, which is the thing that makes tree placement quadratic. A second, much
+ * coarser noise field decides how much of a forest this part of the map wants to be,
+ * so there are thickets and clearings instead of an orchard.
+ */
+function plantTrees(): void {
+  for (let cx = 0; cx * 5 < WORLD_X; cx++) {
+    for (let cz = 0; cz * 5 < WORLD_Z; cz++) {
+      const density = noise2(cx / 3.4 + 61, cz / 3.4 + 29);
+      if (hash2(cx + 7919, cz + 104729) > density * 0.85) continue;
+      const x = cx * 5 + Math.floor(hash2(cx + 13, cz + 91) * 5);
+      const z = cz * 5 + Math.floor(hash2(cx + 57, cz + 7) * 5);
+      if (x < 3 || z < 3 || x >= WORLD_X - 3 || z >= WORLD_Z - 3) continue;
+      const h = heightAt(x, z);
+      // Only on real grass: not on a beach, not in a lake, and not on the roof of a
+      // cave the terrain pass happened to open under the surface.
+      if (h <= SEA_LEVEL + 2) continue;
+      if (blocks[idx(x, h, z)] !== GRASS) continue;
+
+      const trunk = 4 + Math.floor(hash2(x + 331, z + 733) * 3);
+      const top = h + trunk;
+      if (top + 2 >= WORLD_Y) continue;
+      for (let y = h + 1; y <= top; y++) blocks[idx(x, y, z)] = LOG;
+      /*
+       * The canopy. Wide at the bottom, narrow at the top, and with its corners
+       * knocked off by hash so no two crowns are the same square.
+       */
+      for (let dy = -2; dy <= 2; dy++) {
+        const y = top + dy;
+        if (y <= h || y >= WORLD_Y) continue;
+        const r = dy >= 1 ? 1 : 2;
+        for (let dx = -r; dx <= r; dx++) {
+          for (let dz = -r; dz <= r; dz++) {
+            if (dx === 0 && dz === 0 && y <= top) continue; // never bury the trunk
+            if (Math.abs(dx) === r && Math.abs(dz) === r && hash2(x + dx * 71 + y, z + dz * 37) < 0.55) continue;
+            const i = idx(x + dx, y, z + dz);
+            if (blocks[i] === AIR) blocks[i] = LEAVES;
+          }
+        }
+      }
+    }
+  }
+}
+
+/** Grass and flowers on anything green. Free, and the difference between a lawn and a field. */
+function scatterPlants(): void {
+  for (let x = 0; x < WORLD_X; x++) {
+    for (let z = 0; z < WORLD_Z; z++) {
+      const h = heightAt(x, z);
+      if (h + 1 >= WORLD_Y) continue;
+      if (blocks[idx(x, h, z)] !== GRASS) continue;
+      const above = idx(x, h + 1, z);
+      if (blocks[above] !== AIR) continue;
+      const r = hash2(x + 15485863, z + 32452843);
+      if (r < 0.03) blocks[above] = FLOWER;
+      else if (r < 0.22) blocks[above] = TALL_GRASS;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reading and writing blocks
+
+/**
+ * The block at a position, or AIR anywhere outside the world.
+ *
+ * Air outside, rather than stone, so the edge of the island shows its cross-section
+ * — dirt over stone over bedrock, hanging in the sky. Stone would have been the
+ * cheaper answer (every outward face gets culled) and it would have looked like a
+ * bug: the ground would simply stop, with sky where the soil should be.
+ */
+export function getBlock(x: number, y: number, z: number): number {
+  if (!inWorld(x, y, z)) return AIR;
+  return blocks[idx(x, y, z)];
+}
+
+/** The raw store, for the mesher, which cannot afford a function call per neighbour. */
+export function blockArray(): Uint8Array {
+  return blocks;
+}
+
+export function lightArray(): Uint8Array {
+  return light;
+}
+
+/** Sunlight at a cell, 0..15. Out of the world counts as full daylight. */
+export function skyLight(x: number, y: number, z: number): number {
+  if (!inWorld(x, y, z)) return 15;
+  return light[idx(x, y, z)] >> 4;
+}
+
+/** Lamplight at a cell, 0..15. */
+export function blockLight(x: number, y: number, z: number): number {
+  if (!inWorld(x, y, z)) return 0;
+  return light[idx(x, y, z)] & 0x0f;
+}
+
+// ---------------------------------------------------------------------------
+// Which chunks need rebuilding
+//
+// A chunk's mesh depends on its own blocks AND on the ring of blocks around it —
+// a face is only built when the block beside it is see-through, and the corner
+// shading of every face reads the eight cells around it. So a change on a chunk's
+// boundary dirties the chunk next door as well, and forgetting that leaves a
+// one-block seam of stale geometry along every edge you dig at.
+
+const dirty = new Set<number>();
+
+export function chunkIndex(cx: number, cy: number, cz: number): number {
+  return (cy * CHUNKS_Z + cz) * CHUNKS_X + cx;
+}
+
+export function chunkCoords(ci: number): { cx: number; cy: number; cz: number } {
+  const cx = ci % CHUNKS_X;
+  const rest = (ci - cx) / CHUNKS_X;
+  return { cx, cy: (rest / CHUNKS_Z) | 0, cz: rest % CHUNKS_Z };
+}
+
+function markDirty(x: number, y: number, z: number): void {
+  const cx = x >> 4;
+  const cy = y >> 4;
+  const cz = z >> 4;
+  for (let ox = -1; ox <= 1; ox++) {
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let oz = -1; oz <= 1; oz++) {
+        // Only the chunks actually touched: the one the block is in, plus a
+        // neighbour for each face of the chunk the block is sitting against.
+        if (ox !== 0 && (x & 15) !== (ox < 0 ? 0 : 15)) continue;
+        if (oy !== 0 && (y & 15) !== (oy < 0 ? 0 : 15)) continue;
+        if (oz !== 0 && (z & 15) !== (oz < 0 ? 0 : 15)) continue;
+        const nx = cx + ox;
+        const ny = cy + oy;
+        const nz = cz + oz;
+        if (nx < 0 || ny < 0 || nz < 0 || nx >= CHUNKS_X || ny >= CHUNKS_Y || nz >= CHUNKS_Z) continue;
+        dirty.add(chunkIndex(nx, ny, nz));
+      }
+    }
+  }
+}
+
+export function markAllDirty(): void {
+  for (let i = 0; i < CHUNK_COUNT; i++) dirty.add(i);
+}
+
+/** Every chunk that has changed since the last time this was asked. Clears as it goes. */
+export function takeDirtyChunks(): number[] {
+  if (dirty.size === 0) return EMPTY_CHUNKS;
+  const out = [...dirty];
+  dirty.clear();
+  return out;
+}
+
+const EMPTY_CHUNKS: number[] = [];
+
+// ---------------------------------------------------------------------------
+// Light
+//
+// Two channels in one byte: sunlight in the high nibble, lamplight in the low one.
+// They are kept apart rather than added together because they behave differently at
+// dusk — the sun goes out and a lamp does not — and a renderer that only had a
+// single number could not tell "this cave is dark" from "it is night outside".
+//
+// Sunlight falls straight down at full strength through anything see-through and
+// loses a level for every step it takes sideways. That one asymmetry is the whole
+// look of the thing: it is what puts a shaft of daylight down a hole you dug, and
+// what makes the inside of a doorway darker than the outside of it.
+
+const SKY_CHANNEL = 0;
+const BLOCK_CHANNEL = 1;
+
+/**
+ * A flat growable queue of ints.
+ *
+ * `Array.shift()` on a BFS queue is O(n) and turns a light update into a visible
+ * hitch the first time somebody digs into a cave. This walks a read cursor down a
+ * typed array instead, which never moves anything.
+ */
+class IntQueue {
+  private buf = new Int32Array(4096);
+  private len = 0;
+  private head = 0;
+
+  push(v: number): void {
+    if (this.len === this.buf.length) {
+      const grown = new Int32Array(this.len * 2);
+      grown.set(this.buf);
+      this.buf = grown;
+    }
+    this.buf[this.len++] = v;
+  }
+
+  push3(a: number, b: number, c: number): void {
+    this.push(a);
+    this.push(b);
+    this.push(c);
+  }
+
+  push4(a: number, b: number, c: number, d: number): void {
+    this.push3(a, b, c);
+    this.push(d);
+  }
+
+  get done(): boolean {
+    return this.head >= this.len;
+  }
+
+  pop(): number {
+    return this.buf[this.head++];
+  }
+}
+
+/** The six directions, as [dx, dy, dz]. */
+const NEIGHBOURS: [number, number, number][] = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+/**
+ * Whether light changes should dirty chunks.
+ *
+ * Off while the whole world is being lit from scratch, because at that point every
+ * chunk is going to be rebuilt anyway and marking each of a million cells would cost
+ * more than the lighting did.
+ */
+let trackLightDirty = true;
+
+function getLevel(i: number, channel: number): number {
+  return channel === SKY_CHANNEL ? light[i] >> 4 : light[i] & 0x0f;
+}
+
+function setLevel(i: number, channel: number, v: number): void {
+  light[i] = channel === SKY_CHANNEL ? (light[i] & 0x0f) | (v << 4) : (light[i] & 0xf0) | v;
+}
+
+/** Push light outward from everything already in `q` until it runs out. */
+function spread(q: IntQueue, channel: number): void {
+  while (!q.done) {
+    const x = q.pop();
+    const y = q.pop();
+    const z = q.pop();
+    const level = getLevel(idx(x, y, z), channel);
+    if (level <= 1) continue;
+    for (const [dx, dy, dz] of NEIGHBOURS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const nz = z + dz;
+      if (!inWorld(nx, ny, nz)) continue;
+      const ni = idx(nx, ny, nz);
+      const opacity = BLOCKS[blocks[ni]].opacity;
+      if (opacity >= 15) continue;
+      // Straight down, at full strength, through anything perfectly clear. See the
+      // note at the top of this section — this line is the shaft of daylight.
+      const next =
+        channel === SKY_CHANNEL && dy === -1 && level === 15 && opacity === 0
+          ? 15
+          : level - Math.max(1, opacity);
+      if (next <= getLevel(ni, channel)) continue;
+      setLevel(ni, channel, next);
+      if (trackLightDirty) markDirty(nx, ny, nz);
+      q.push3(nx, ny, nz);
+    }
+  }
+}
+
+/**
+ * Take light AWAY, which is the hard half.
+ *
+ * When a block is placed in a lit cell, every cell that was lit BY that cell has to
+ * go dark too, and every cell that was lit by something else has to stay. The trick
+ * is that those are distinguishable: a neighbour dimmer than you was lit by you, a
+ * neighbour at least as bright as you was lit by something else and becomes a source
+ * to refill the hole from. So one sweep does both, collecting the survivors as it
+ * goes, and then the survivors pour back in.
+ */
+function unspread(q: IntQueue, channel: number): void {
+  const refill = new IntQueue();
+  while (!q.done) {
+    const x = q.pop();
+    const y = q.pop();
+    const z = q.pop();
+    const level = q.pop();
+    for (const [dx, dy, dz] of NEIGHBOURS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const nz = z + dz;
+      if (!inWorld(nx, ny, nz)) continue;
+      const ni = idx(nx, ny, nz);
+      const nl = getLevel(ni, channel);
+      if (nl === 0) continue;
+      // The downward case again, mirrored: a cell below a full-strength sky cell was
+      // lit by it at the same level, so "dimmer than me" never catches it.
+      const litByUs = nl < level || (channel === SKY_CHANNEL && dy === -1 && level === 15 && nl === 15);
+      if (litByUs) {
+        setLevel(ni, channel, 0);
+        if (trackLightDirty) markDirty(nx, ny, nz);
+        q.push4(nx, ny, nz, nl);
+      } else {
+        refill.push3(nx, ny, nz);
+      }
+    }
+  }
+  spread(refill, channel);
+}
+
+/** Light the entire world from nothing. Runs once at startup and once per reconnect. */
+export function relightAll(): void {
+  trackLightDirty = false;
+  light.fill(0);
+
+  // Sunlight, straight down every column, stopping when the ground eats it.
+  for (let x = 0; x < WORLD_X; x++) {
+    for (let z = 0; z < WORLD_Z; z++) {
+      const col = (x * WORLD_Z + z) * WORLD_Y;
+      let level = 15;
+      for (let y = WORLD_Y - 1; y >= 0; y--) {
+        const i = col + y;
+        level = Math.max(0, level - BLOCKS[blocks[i]].opacity);
+        if (level === 0) break;
+        light[i] = level << 4;
+      }
+    }
+  }
 
   /*
-   * Trees, in stands rather than sprinkled evenly. A second noise field decides
-   * where a forest wants to be and a per-tile hash decides which tiles in it
-   * actually grow one, so the map has clearings and thickets instead of an orchard.
+   * Now spread it sideways — but seed the queue with the FRONTIER rather than with
+   * every lit cell. Half a million cells of open sky are all at 15 with nothing to
+   * give each other; the only cells that can still light anything are the ones next
+   * to something darker. Finding them is one extra pass over the array and it turns
+   * a queue of a million entries into one of a few thousand.
    */
-  const list: Tree[] = [];
-  const index = new Int32Array(WORLD_W * WORLD_H).fill(-1);
-  for (let ty = 1; ty < WORLD_H - 1; ty++) {
-    for (let tx = 1; tx < WORLD_W - 1; tx++) {
-      if (t[ty * WORLD_W + tx] !== GRASS) continue;
-      // Keep the spawn clearing clear — you should be able to see who else is here.
-      if (Math.hypot(tx - WORLD_W / 2, ty - WORLD_H / 2) < 5) continue;
-      const want = noise(tx / 8 + 91, ty / 8 + 57);
-      if (hash(tx + 7919, ty + 104729) > (want - 0.42) * 1.0) continue;
-      const h1 = hash(tx + 31337, ty + 7777);
-      const h2 = hash(tx + 999983, ty + 24593);
-      const x = tx * TILE + 3 + h1 * 10;
-      const y = ty * TILE + 3 + h2 * 10;
-      /*
-       * No two trunks closer than this.
-       *
-       * Trees are placed anywhere within their tile, so two in neighbouring tiles
-       * can land six pixels apart — and then their no-walk circles overlap so hard
-       * that a body squeezed between them cannot satisfy both, and `pushOutOfTrees`
-       * spends its passes shoving it back and forth. Thinning those pairs out at
-       * GENERATION is the fix; trying to solve an impossible position at run time is
-       * not. It costs a handful of trees out of seven hundred.
-       */
-      let crowded = false;
-      for (let ny = ty - 1; ny <= ty && !crowded; ny++) {
-        for (let nx = tx - 1; nx <= tx + 1; nx++) {
-          const j = ny * WORLD_W + nx;
-          if (j < 0 || j >= index.length || index[j] < 0) continue;
-          const other = list[index[j]];
-          if (Math.hypot(other.x - x, other.y - y) < MIN_TREE_GAP) {
-            crowded = true;
+  spread(frontier(SKY_CHANNEL), SKY_CHANNEL);
+
+  // Lamps. Few enough that there is no frontier trick to play.
+  const lamps = new IntQueue();
+  for (let x = 0; x < WORLD_X; x++) {
+    for (let z = 0; z < WORLD_Z; z++) {
+      const col = (x * WORLD_Z + z) * WORLD_Y;
+      for (let y = 0; y < WORLD_Y; y++) {
+        const glow = BLOCKS[blocks[col + y]].glow;
+        if (glow === 0) continue;
+        light[col + y] |= glow;
+        lamps.push3(x, y, z);
+      }
+    }
+  }
+  spread(lamps, BLOCK_CHANNEL);
+
+  trackLightDirty = true;
+  markAllDirty();
+}
+
+function frontier(channel: number): IntQueue {
+  const q = new IntQueue();
+  for (let x = 0; x < WORLD_X; x++) {
+    for (let z = 0; z < WORLD_Z; z++) {
+      const col = (x * WORLD_Z + z) * WORLD_Y;
+      for (let y = 0; y < WORLD_Y; y++) {
+        const level = getLevel(col + y, channel);
+        if (level <= 1) continue;
+        for (const [dx, dy, dz] of NEIGHBOURS) {
+          const nx = x + dx;
+          const ny = y + dy;
+          const nz = z + dz;
+          if (!inWorld(nx, ny, nz)) continue;
+          const ni = idx(nx, ny, nz);
+          if (BLOCKS[blocks[ni]].opacity >= 15) continue;
+          if (getLevel(ni, channel) < level - 1) {
+            q.push3(x, y, z);
             break;
           }
         }
       }
-      if (crowded) continue;
-      index[ty * WORLD_W + tx] = list.length;
-      list.push({ x, y, tx, ty, vary: hash(tx + 60013, ty + 15485863) });
     }
   }
-  // Sorted by y once, so the top-down view can draw them back-to-front without
-  // sorting four thousand tiles every frame.
-  list.sort((a, b) => a.y - b.y);
-  for (let i = 0; i < list.length; i++) index[list[i].ty * WORLD_W + list[i].tx] = i;
-  treeCache = list;
-  treeAtTile = index;
+  return q;
 }
 
-/** The whole terrain grid, one byte per tile. Built once, on first use. */
-export function terrainGrid(): Uint8Array {
-  build();
-  return terrainCache!;
-}
-
-/** Every tree in the world, sorted by y. Built once, on first use. */
-export function trees(): readonly Tree[] {
-  build();
-  return treeCache!;
-}
-
-/** The tree on a tile, or null. */
-export function treeOn(tx: number, ty: number): Tree | null {
-  build();
-  if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H) return null;
-  const i = treeAtTile![ty * WORLD_W + tx];
-  return i < 0 ? null : treeCache![i];
-}
-
-/** What kind of ground is under a world-pixel position. */
-export function terrainAt(x: number, y: number): Terrain {
-  build();
-  const tx = Math.min(WORLD_W - 1, Math.max(0, Math.floor(x / TILE)));
-  const ty = Math.min(WORLD_H - 1, Math.max(0, Math.floor(y / TILE)));
-  return terrainCache![ty * WORLD_W + tx] as Terrain;
-}
-
-// ---------------------------------------------------------------------------
-// Things lying on the ground
-//
-// Generated the same way the trees are — a pure function of where you are, never
-// sent. What IS sent is which of them have been picked up, which is a short list of
-// indices rather than the whole world's worth of positions every tick.
-
-export const BERRY = 0;
-export const PEBBLE = 1;
-export type ItemKind = 0 | 1;
-
-export interface Item {
-  x: number;
-  y: number;
-  kind: ItemKind;
-}
-
-/** Walk this close and it is yours. Generous — nobody should have to aim to pick up. */
-export const PICKUP_R = 9;
-/** How long before a picked spot grows back. */
-export const REGROW_MS = 18_000;
-/** Pebbles you can carry at once. */
-export const MAX_CARRY = 6;
-
-let itemCache: Item[] | null = null;
-
-/**
- * Berries and pebbles, everywhere they belong.
- *
- * Berries want shade, so they grow near trees; pebbles want a shore, so they lie on
- * the sand. That is not decoration — it means the two things you need come from two
- * different places, and going to get one is a walk somewhere rather than a lap of
- * wherever you already are.
- */
-export function items(): readonly Item[] {
-  if (itemCache) return itemCache;
-  build();
-  const out: Item[] = [];
-  for (let ty = 1; ty < WORLD_H - 1; ty++) {
-    for (let tx = 1; tx < WORLD_W - 1; tx++) {
-      const kind = terrainCache![ty * WORLD_W + tx];
-      const h = hash(tx + 5772, ty + 90001);
-      const x = tx * TILE + 4 + hash(tx + 1223, ty + 77) * 8;
-      const y = ty * TILE + 4 + hash(tx + 88, ty + 4441) * 8;
-      if (kind === GRASS) {
-        // Under the canopy: a tile is berry country if it has a tree beside it.
-        let shade = false;
-        for (let ny = ty - 1; ny <= ty + 1 && !shade; ny++) {
-          for (let nx = tx - 1; nx <= tx + 1; nx++) {
-            if (treeOn(nx, ny)) {
-              shade = true;
-              break;
-            }
-          }
-        }
-        if (!shade || h > 0.16) continue;
-        out.push({ x, y, kind: BERRY });
-        continue;
+/** Redo the light around one changed cell, in both channels. */
+function relightAround(x: number, y: number, z: number, placed: number): void {
+  for (const channel of [SKY_CHANNEL, BLOCK_CHANNEL]) {
+    const i = idx(x, y, z);
+    const had = getLevel(i, channel);
+    if (had > 0) {
+      setLevel(i, channel, 0);
+      const remove = new IntQueue();
+      remove.push4(x, y, z, had);
+      unspread(remove, channel);
+    }
+    const add = new IntQueue();
+    // A lamp is its own source.
+    if (channel === BLOCK_CHANNEL) {
+      const glow = blockDef(placed).glow;
+      if (glow > 0) {
+        setLevel(i, channel, glow);
+        add.push3(x, y, z);
       }
-      if (kind !== SAND || h > 0.28) continue;
-      out.push({ x, y, kind: PEBBLE });
     }
+    // And whatever is around the hole pours into it. This is the case that matters
+    // when a block is DUG rather than placed: the cell had no light of its own to
+    // remove, and everything it gets comes from its neighbours.
+    for (const [dx, dy, dz] of NEIGHBOURS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const nz = z + dz;
+      if (!inWorld(nx, ny, nz)) continue;
+      if (getLevel(idx(nx, ny, nz), channel) > 0) add.push3(nx, ny, nz);
+    }
+    spread(add, channel);
   }
-  // Never inside a trunk, where nobody could reach it.
-  itemCache = out.map((it) => ({ ...it, ...pushOutOfTrees(it.x, it.y) }));
-  return itemCache;
+  markDirty(x, y, z);
 }
 
 // ---------------------------------------------------------------------------
-// Thrown pebbles
+// Changing the world
 
-/** Pixels per second, and how far one carries before it drops. */
-export const PEBBLE_SPEED = 210;
-export const PEBBLE_RANGE = 190;
-/** How close a stone has to pass to count as a hit. */
-export const PEBBLE_HIT_R = 8;
-
-export interface Stone {
-  id: number;
-  /** Who threw it, so it cannot hit them in the back of the head on the way out. */
-  by: string;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  /** Pixels still to travel. */
-  left: number;
+/**
+ * Put a block somewhere, and fix the light and the meshes it affected.
+ *
+ * Returns false when nothing changed, so a duplicate edit arriving from the server
+ * for a block the client already predicted correctly costs nothing at all — which is
+ * the common case, since every edit you make comes back to you.
+ */
+export function setBlock(x: number, y: number, z: number, b: number): boolean {
+  if (!inWorld(x, y, z)) return false;
+  const i = idx(x, y, z);
+  if (blocks[i] === b) return false;
+  blocks[i] = b;
+  markDirty(x, y, z);
+  relightAround(x, y, z, b);
+  return true;
 }
 
 /**
- * Fly one stone for `dt`. Returns false once it is spent — out of range, in a tree,
- * or off the edge of the world.
- *
- * It does NOT check people; the server does that, because who got hit is the one
- * part of this that has to be decided in exactly one place.
+ * Apply an edit without touching the light. For replaying a whole world's worth of
+ * them at join time, where one relight at the end is cheaper than ten thousand
+ * incremental ones — by about four orders of magnitude.
  */
-export function stepStone(s: Stone, dt: number): boolean {
-  const step = Math.hypot(s.vx, s.vy) * dt;
-  s.x += s.vx * dt;
-  s.y += s.vy * dt;
-  s.left -= step;
-  if (s.left <= 0) return false;
-  if (s.x < 0 || s.y < 0 || s.x >= WORLD_PX_W || s.y >= WORLD_PX_H) return false;
-  // Trees stop stones. A forest is cover, which is the only reason to stand in one.
-  const tx = Math.floor(s.x / TILE);
-  const ty = Math.floor(s.y / TILE);
-  for (let ny = ty - 1; ny <= ty + 1; ny++) {
-    for (let nx = tx - 1; nx <= tx + 1; nx++) {
-      const tree = treeOn(nx, ny);
-      if (tree && Math.hypot(s.x - tree.x, s.y - tree.y) < TREE_R) return false;
-    }
+export function setBlockRaw(index: number, b: number): void {
+  if (index >= 0 && index < CELLS) blocks[index] = b;
+}
+
+/** Throw away every change anybody has made and go back to the generated world. */
+export function resetToPristine(): void {
+  generate();
+  blocks.set(pristine);
+}
+
+/**
+ * What the generator would have put at a cell, whatever is there now.
+ *
+ * The server uses this to decide whether a change is still a change: fill a hole
+ * back in and the edit is forgotten rather than recorded as "dirt, where dirt would
+ * have been anyway". Otherwise the save file only ever grows, and a world where
+ * everybody has been tidying up would be bigger than one nobody had touched.
+ */
+export function pristineBlock(index: number): number {
+  return index >= 0 && index < CELLS ? pristine[index] : AIR;
+}
+
+// ---------------------------------------------------------------------------
+// Looking at things
+
+export interface Hit {
+  /** The block that was hit. */
+  x: number;
+  y: number;
+  z: number;
+  /** The face it was hit on, as a unit normal. New blocks go on this side. */
+  nx: number;
+  ny: number;
+  nz: number;
+  /** Distance along the ray. */
+  dist: number;
+}
+
+/** Blocks you can point at. Water is not one of them; neither is air. */
+export function targetable(b: number): boolean {
+  return b !== AIR && !blockDef(b).liquid;
+}
+
+/**
+ * March a ray through the grid and return the first block it meets.
+ *
+ * Amanatides and Woo, which visits every cell the ray passes through in order and
+ * never misses one — as opposed to sampling along the ray every tenth of a block,
+ * which is the version everybody writes first and which lets you shoot diagonally
+ * through the corner between two blocks.
+ */
+export function raycast(
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  maxDist: number,
+): Hit | null {
+  let x = Math.floor(ox);
+  let y = Math.floor(oy);
+  let z = Math.floor(oz);
+
+  const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+  const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+  const stepZ = dz > 0 ? 1 : dz < 0 ? -1 : 0;
+
+  const tDeltaX = stepX === 0 ? Infinity : Math.abs(1 / dx);
+  const tDeltaY = stepY === 0 ? Infinity : Math.abs(1 / dy);
+  const tDeltaZ = stepZ === 0 ? Infinity : Math.abs(1 / dz);
+
+  let tMaxX = stepX === 0 ? Infinity : ((stepX > 0 ? x + 1 - ox : ox - x) / Math.abs(dx));
+  let tMaxY = stepY === 0 ? Infinity : ((stepY > 0 ? y + 1 - oy : oy - y) / Math.abs(dy));
+  let tMaxZ = stepZ === 0 ? Infinity : ((stepZ > 0 ? z + 1 - oz : oz - z) / Math.abs(dz));
+
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+  let t = 0;
+
+  // Standing inside something already — the only way to get here is by placing a
+  // block on your own head, and pointing at it from the inside has no face to speak of.
+  if (inWorld(x, y, z) && targetable(blocks[idx(x, y, z)])) {
+    return { x, y, z, nx: 0, ny: 0, nz: 0, dist: 0 };
   }
-  return true;
+
+  while (t <= maxDist) {
+    if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+      x += stepX;
+      t = tMaxX;
+      tMaxX += tDeltaX;
+      nx = -stepX;
+      ny = 0;
+      nz = 0;
+    } else if (tMaxY < tMaxZ) {
+      y += stepY;
+      t = tMaxY;
+      tMaxY += tDeltaY;
+      nx = 0;
+      ny = -stepY;
+      nz = 0;
+    } else {
+      z += stepZ;
+      t = tMaxZ;
+      tMaxZ += tDeltaZ;
+      nx = 0;
+      ny = 0;
+      nz = -stepZ;
+    }
+    if (t > maxDist) return null;
+    // Out of the world sideways or out the top: keep going, because the world is an
+    // island and a ray can leave it and come back. Out the bottom, it is gone.
+    if (y < 0) return null;
+    if (!inWorld(x, y, z)) continue;
+    if (targetable(blocks[idx(x, y, z)])) return { x, y, z, nx, ny, nz, dist: t };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
 // People
+//
+// A body is a box six-tenths of a block across and one and four-fifths tall, with
+// its eyes just under the top of it. Those are Minecraft's numbers and they are
+// Minecraft's numbers for a good reason: a body narrower than a block fits down a
+// one-block hole, and eyes below the top of the body mean a two-block-high tunnel
+// does not clip through your head.
 
-export type Dir = 'down' | 'up' | 'left' | 'right';
+export const PLAYER_W = 0.6;
+export const PLAYER_H = 1.8;
+export const EYE_H = 1.62;
+
+/** How far you can reach to dig or build. */
+export const REACH = 5;
+
+export const WALK_SPEED = 4.4;
+export const SPRINT_SPEED = 6.1;
+export const SWIM_SPEED = 2.9;
+
+/**
+ * Jumping. Tuned as a pair rather than separately: peak height is v²/2g, so these
+ * two numbers mean "one and a quarter blocks", which is the number that matters —
+ * it is exactly enough to get up a single step and nowhere near enough for two.
+ */
+export const JUMP_V = 8.4;
+export const GRAVITY = 28;
+export const TERMINAL_V = 38;
+
+/** In water you sink slowly, rise slowly, and everything takes longer. */
+export const WATER_GRAVITY = 7;
+export const WATER_SINK_MAX = 2.4;
+export const SWIM_UP_V = 3.6;
+
+/** Authoritative ticks per second, and how often the client posts its input. */
+export const TICK_RATE = 20;
+export const TICK_MS = 1000 / TICK_RATE;
+export const INPUT_RATE = 20;
+
+/**
+ * How far behind the newest snapshot other people are drawn.
+ *
+ * Rendering them at the very latest position means stuttering every time a packet is
+ * late. Holding them a tenth of a second in the past means there is always a pair of
+ * snapshots to interpolate between, and the cost is 100ms of lag on somebody else's
+ * position — which nobody can perceive and everybody prefers to jitter.
+ */
+export const INTERP_DELAY_MS = 100;
+
+/** A whole day, in milliseconds. Twelve minutes: long enough to build something in. */
+export const DAY_MS = 12 * 60 * 1000;
 
 export interface Player {
   id: string;
   name: string;
-  /** Pixel position of the player's feet, in world space. */
+  /** The middle of the feet. */
   x: number;
   y: number;
-  dir: Dir;
-  /** True while they are actually moving, which is what drives the walk cycle. */
-  moving: boolean;
-  /**
-   * Height above the ground in pixels. The FEET stay at (x, y) whatever this is —
-   * a jump lifts the drawing, not the position, so the shadow and everyone's sense
-   * of where you are standing stay honest.
-   */
   z: number;
-  /** Vertical speed, pixels per second. Positive is upward. */
-  vz: number;
+  /** Vertical speed, blocks per second. Positive is up. */
+  vy: number;
+  /** Where they are looking. Radians; yaw 0 is +x, pitch is up-positive. */
+  yaw: number;
+  pitch: number;
+  onGround: boolean;
+  inWater: boolean;
+  /** True while actually walking, which is what drives the arms and legs. */
+  moving: boolean;
+  sprinting: boolean;
   /** Chosen at join and never changed, so everyone renders you the same colour. */
   hue: number;
-  /**
-   * Pips of health, 0..MAX_HP. Only ever written by the server — the client draws
-   * what it is told rather than predicting it. Being briefly wrong about a position
-   * is invisible; being briefly wrong about who just got hit is not.
-   */
-  hp: number;
-  /** Pebbles in hand. */
-  pebbles: number;
-  /**
-   * Seconds left flat on your back. Above zero you cannot walk, swing, throw or be
-   * hit — the last one on purpose, so somebody standing over you cannot keep you
-   * there while you are getting up.
-   */
-  down: number;
-  /** Seconds left of a swing, for drawing it. Everybody sees everybody's. */
-  swing: number;
 }
 
-/** Clamp a position to the walkable world. */
-export function clampToWorld(x: number, y: number): { x: number; y: number } {
-  const halfW = BODY_W / 2;
-  return {
-    x: Math.min(WORLD_PX_W - halfW, Math.max(halfW, x)),
-    y: Math.min(WORLD_PX_H - 1, Math.max(BODY_H, y)),
-  };
+export interface MoveInput {
+  /** Forward, in [-1, 1], relative to where the player is facing. */
+  fwd: number;
+  /** To the player's right, in [-1, 1]. */
+  strafe: number;
+  jump: boolean;
+  sprint: boolean;
 }
 
-/**
- * Push a position out of any tree it has ended up inside.
- *
- * Only the nine tiles around the point are checked, which is every tree that could
- * possibly reach: a trunk is five pixels and a tile is sixteen.
- *
- * Several passes, because coming out of one trunk can put you inside the next, and
- * the second push has to see where the first one left you. It converges rather than
- * oscillating only because `MIN_TREE_GAP` guarantees an answer exists — with trunks
- * closer than two bodies there is no position that satisfies both and no number of
- * passes would find one. It stops early the moment a pass moves nothing, which is
- * almost every step, since almost every step is in the open.
- */
-export function pushOutOfTrees(x: number, y: number): { x: number; y: number } {
-  const reach = TREE_R + BODY_W / 2 - 1;
-  for (let pass = 0; pass < 4; pass++) {
-    const tx0 = Math.floor((x - reach) / TILE);
-    const tx1 = Math.floor((x + reach) / TILE);
-    const ty0 = Math.floor((y - reach) / TILE);
-    const ty1 = Math.floor((y + reach) / TILE);
-    let moved = false;
-    for (let ty = ty0; ty <= ty1; ty++) {
-      for (let tx = tx0; tx <= tx1; tx++) {
-        const tree = treeOn(tx, ty);
-        if (!tree) continue;
-        const dx = x - tree.x;
-        const dy = y - tree.y;
-        const d = Math.hypot(dx, dy);
-        if (d >= reach) continue;
-        if (d < 0.0001) {
-          // Dead centre, so there is no direction to be pushed. Any one will do.
-          x = tree.x + reach;
-        } else {
-          x = tree.x + (dx / d) * reach;
-          y = tree.y + (dy / d) * reach;
-        }
-        moved = true;
+/** A hair of slack, so a body resting against a wall is not also inside it. */
+const SKIN = 1e-4;
+
+function solidBoxAt(x: number, y: number, z: number): boolean {
+  const h = PLAYER_W / 2;
+  const x0 = Math.floor(x - h);
+  const x1 = Math.floor(x + h);
+  const y0 = Math.floor(y);
+  const y1 = Math.floor(y + PLAYER_H - SKIN);
+  const z0 = Math.floor(z - h);
+  const z1 = Math.floor(z + h);
+  for (let bx = x0; bx <= x1; bx++) {
+    for (let by = y0; by <= y1; by++) {
+      for (let bz = z0; bz <= z1; bz++) {
+        if (BLOCKS[getBlock(bx, by, bz)].solid) return true;
       }
     }
-    if (!moved) break;
   }
-  return { x, y };
+  return false;
+}
+
+/** True when a box at this spot would be standing in water up to its waist. */
+function inLiquid(x: number, y: number, z: number): boolean {
+  return BLOCKS[getBlock(Math.floor(x), Math.floor(y + 0.5), Math.floor(z))].liquid;
 }
 
 /**
- * Push a position out of anybody standing in it.
+ * Move one player one step.
  *
- * Bodies are solid, but only ON THE GROUND: two people in the air pass through each
- * other, and so does somebody jumping over somebody standing. A jump that could be
- * blocked by a head would be a jump that gets you wedged, and being able to hop over
- * a person who is blocking a gap is worth far more than the realism of not.
+ * The ONE place walking is defined, called by the server to advance the world and by
+ * the client to predict its own next position.
  *
- * Only the mover is pushed. The other party runs its own step on its own tick and
- * gets pushed the other way, which is what makes two people meeting separate
- * evenly rather than one of them bulldozing the other.
+ * Movement is resolved one axis at a time, which is the whole trick: try the move,
+ * and if the box now overlaps something solid, put it back against the face it hit
+ * and forget that axis. Doing all three at once and then trying to work out which
+ * one to undo is the version that lets you slide diagonally into corners.
  */
-export function pushOutOfPlayers(
-  x: number,
-  y: number,
-  z: number,
-  others: readonly { x: number; y: number; z: number; down: number }[],
-): { x: number; y: number } {
-  if (z > 0) return { x, y };
-  for (const o of others) {
-    if (o.z > 0 || o.down > 0) continue; // in the air, or flat on the ground
-    const dx = x - o.x;
-    const dy = y - o.y;
-    const d = Math.hypot(dx, dy);
-    if (d >= PLAYER_R) continue;
-    if (d < 0.0001) {
-      x = o.x + PLAYER_R;
-    } else {
-      x = o.x + (dx / d) * PLAYER_R;
-      y = o.y + (dy / d) * PLAYER_R;
-    }
-  }
-  return { x, y };
-}
-
-/**
- * Move one step. The ONE place walking is defined, called by the server to advance
- * the world and by the client to predict its own next position.
- *
- * Diagonals are normalised — without it, holding two keys is 1.41x faster than one,
- * which players find immediately and then never walk in a straight line again.
- *
- * `others` is everybody else's body. The server passes the live ones and the client
- * passes the interpolated ones, so the client's guess is a tenth of a second stale —
- * which is exactly what reconciliation is for and is invisible at walking pace.
- */
-export function step(
-  p: { x: number; y: number; dir: Dir; moving: boolean; z: number; vz: number },
-  inx: number,
-  iny: number,
-  dt: number,
-  jump = false,
-  others: readonly { x: number; y: number; z: number; down: number }[] = [],
-): void {
+export function step(p: Player, inp: MoveInput, dt: number): void {
   /*
-   * Jump first, and only from the ground — holding the key must not let you climb.
-   * `z <= 0` is the whole grounded test; there is nothing to stand on but the floor.
+   * Cut the frame into pieces small enough that nothing moves further than a third
+   * of a block in one go. Terminal velocity is thirty-eight blocks a second and a
+   * server tick is a twentieth of one, which is nearly two whole blocks of falling —
+   * enough to start a step above a floor and finish below it, having touched
+   * nothing. Substepping is what makes the axis resolution above safe.
    */
-  if (jump && p.z <= 0) p.vz = JUMP_SPEED;
-  const airborne = p.z > 0 || p.vz !== 0;
-  if (airborne) {
-    p.vz -= GRAVITY * dt;
-    p.z += p.vz * dt;
-    if (p.z <= 0) {
-      p.z = 0;
-      p.vz = 0;
-    }
-  }
+  const water = inLiquid(p.x, p.y, p.z);
+  const horizontal = water ? SWIM_SPEED : inp.sprint && inp.fwd > 0 ? SPRINT_SPEED : WALK_SPEED;
+  const fastest = Math.max(horizontal, Math.abs(p.vy) + GRAVITY * dt);
+  const parts = Math.max(1, Math.min(8, Math.ceil((fastest * dt) / 0.34)));
+  const slice = dt / parts;
+  for (let i = 0; i < parts; i++) substep(p, inp, slice, horizontal);
+}
 
-  const len = Math.hypot(inx, iny);
+function substep(p: Player, inp: MoveInput, dt: number, horizontal: number): void {
+  p.inWater = inLiquid(p.x, p.y, p.z);
+
+  if (p.inWater) {
+    /*
+     * Swimming. Holding jump climbs, letting go sinks — slowly, and to a floor
+     * rather than to a drowning. Nothing in this world kills you, so deep water is
+     * a place that is slow and dark rather than a place that ends you; the cost of
+     * going in is the ninety seconds it takes to get out.
+     */
+    if (inp.jump) p.vy = SWIM_UP_V;
+  } else if (inp.jump && p.onGround) {
+    p.vy = JUMP_V;
+  }
+  /*
+   * The launch is an INSTANT change of speed and the fall is a gradual one, so the
+   * jump is applied first and the averaging below starts from the speed it left you
+   * with. Averaging across the impulse instead — which is what happens if the two
+   * are done in one expression — throws away the first half-step of every jump, and
+   * a jump missing its first half-step clears 1.05 blocks instead of 1.26. That is
+   * the difference between stepping up onto a block and bouncing off the side of it,
+   * and it is invisible in the code that caused it.
+   */
+  const launched = p.vy;
+  const pull = p.inWater ? WATER_GRAVITY : GRAVITY;
+  const floor = p.inWater ? -WATER_SINK_MAX : -TERMINAL_V;
+  p.vy = Math.max(floor, p.vy - pull * dt);
+
+  /*
+   * Move by the AVERAGE of the speed at both ends of the step rather than by the
+   * speed at the end of it. It is exact for constant acceleration and — much more
+   * importantly — it is the same answer at every frame rate.
+   *
+   * Taking `vy * dt` is the version everybody writes, and it makes the height of a
+   * jump depend on how fast your computer is: a 144 Hz screen cleared a block and a
+   * third, a 20 Hz server tick a block and a fifth. Which means the client predicts
+   * a jump the server never gives it, and every hop ends in a snap back down. The
+   * whole point of `step` living in a shared file is that both sides get the same
+   * number, and a frame-rate-dependent integrator quietly gives that up.
+   */
+  moveY(p, (launched + p.vy) * 0.5 * dt);
+
+  const len = Math.hypot(inp.fwd, inp.strafe);
   if (len < 0.01) {
     p.moving = false;
+  } else {
+    // Normalised, because otherwise holding two keys is 1.41x faster than one and
+    // players find that out immediately and then never walk in a straight line again.
+    const fwd = inp.fwd / len;
+    const strafe = inp.strafe / len;
+    const cos = Math.cos(p.yaw);
+    const sin = Math.sin(p.yaw);
+    // Forward is where the face points; right is a quarter turn clockwise from it.
+    const dx = (fwd * cos - strafe * sin) * horizontal * dt;
+    const dz = (fwd * sin + strafe * cos) * horizontal * dt;
+    moveX(p, dx);
+    moveZ(p, dz);
+    p.moving = true;
+  }
+  p.sprinting = inp.sprint && inp.fwd > 0 && !p.inWater && p.moving;
+
+  clampToWorld(p);
+}
+
+function moveY(p: Player, dy: number): void {
+  if (dy === 0) return;
+  const ny = p.y + dy;
+  if (!solidBoxAt(p.x, ny, p.z)) {
+    p.y = ny;
+    /*
+     * Any vertical move that succeeds means you are not standing on anything —
+     * INCLUDING an upward one. This used to only clear the flag when falling, which
+     * looks harmless and is not: on the way up out of a jump the flag was still set
+     * from the landing before it, so the next substep saw "jump held, on the ground"
+     * and launched again. Leaning on the space bar climbed into the sky at walking
+     * pace and straight over any wall you cared to name.
+     */
+    p.onGround = false;
     return;
   }
-  const nx = inx / len;
-  const ny = iny / len;
-  /*
-   * Ground slows you down; air does not. Wading through a lake is meant to be a
-   * decision, but a jump is over the water rather than in it — which is also what
-   * makes a narrow inlet something you can clear instead of something you swim.
-   */
-  const speed = WALK_SPEED * (p.z > 0 ? 1 : SPEED_OF[terrainAt(p.x, p.y)]);
-  const next = clampToWorld(p.x + nx * speed * dt, p.y + ny * speed * dt);
-  // Trees stop you at any height. They are taller than you can jump, and a canopy
-  // you can hop through would make every forest a lie.
-  const clear = pushOutOfTrees(next.x, next.y);
-  // People second, then trees again: being shoved out of somebody can put you in a
-  // trunk, and of the two the tree is the one that must win — a person you overlap
-  // slightly is a scuffle, a person inside a tree is stuck.
-  const apart = pushOutOfPlayers(clear.x, clear.y, p.z, others);
-  const free = pushOutOfTrees(apart.x, apart.y);
-  const settled = clampToWorld(free.x, free.y);
-  p.x = settled.x;
-  p.y = settled.y;
-  p.moving = true;
-  // Face whichever axis you are pushing hardest, so a diagonal still has one face.
-  if (Math.abs(nx) > Math.abs(ny)) p.dir = nx > 0 ? 'right' : 'left';
-  else p.dir = ny > 0 ? 'down' : 'up';
+  if (dy < 0) {
+    // Feet ended up inside the block at floor(ny); stand on its top face.
+    p.y = Math.floor(ny) + 1;
+    p.onGround = true;
+  } else {
+    // Head first into a ceiling: the head is inside floor(ny + height), so the face
+    // it hit is the BOTTOM of that block, which is floor(ny + height) itself.
+    p.y = Math.floor(ny + PLAYER_H) - PLAYER_H - SKIN;
+  }
+  p.vy = 0;
+}
+
+/*
+ * Being stopped is `floor`, not `ceil`, in both directions, and getting that wrong is
+ * not a small error — it is a teleport.
+ *
+ * Walking east, the box's leading edge ends up somewhere inside block
+ * `floor(x + halfWidth)`, and the face it ran into is that block's WEST side, which
+ * is at exactly that integer. Rounding UP instead names the far side of the block it
+ * hit, which puts the body a whole block further along than it was trying to go —
+ * so walking into a wall shot you through it, faster than walking in the open. It
+ * took a probe that measured blocks-per-second against a wall to see it, because on
+ * open ground the branch never runs at all.
+ */
+function moveX(p: Player, dx: number): void {
+  if (dx === 0) return;
+  const nx = p.x + dx;
+  if (!solidBoxAt(nx, p.y, p.z)) {
+    p.x = nx;
+    return;
+  }
+  const h = PLAYER_W / 2;
+  p.x = dx > 0 ? Math.floor(nx + h) - h - SKIN : Math.floor(nx - h) + 1 + h + SKIN;
+}
+
+function moveZ(p: Player, dz: number): void {
+  if (dz === 0) return;
+  const nz = p.z + dz;
+  if (!solidBoxAt(p.x, p.y, nz)) {
+    p.z = nz;
+    return;
+  }
+  const h = PLAYER_W / 2;
+  p.z = dz > 0 ? Math.floor(nz + h) - h - SKIN : Math.floor(nz - h) + 1 + h + SKIN;
+}
+
+/** Keep a body inside the island. The edge is a wall you cannot fall off. */
+export function clampToWorld(p: Player): void {
+  const h = PLAYER_W / 2;
+  p.x = Math.min(WORLD_X - h, Math.max(h, p.x));
+  p.z = Math.min(WORLD_Z - h, Math.max(h, p.z));
+  if (p.y < 0) {
+    p.y = 0;
+    p.vy = 0;
+    p.onGround = true;
+  }
+  if (p.y > WORLD_Y) p.y = WORLD_Y;
+}
+
+/** Would a body at this spot be inside a block? Used to refuse a build under someone. */
+export function bodyOverlapsBlock(px: number, py: number, pz: number, bx: number, by: number, bz: number): boolean {
+  const h = PLAYER_W / 2;
+  return (
+    px + h > bx && px - h < bx + 1 && py + PLAYER_H > by && py < by + 1 && pz + h > bz && pz - h < bz + 1
+  );
 }
 
 /**
- * Take a hit. Server-side only.
+ * Somewhere to arrive.
  *
- * At zero the player goes DOWN rather than away: `down` counts off the seconds they
- * spend flat, and `getUp` puts them back on their feet with a full bar exactly where
- * they fell. There is no respawn and no teleport, because losing your place is the
- * part of dying that actually costs you something and none of this is worth that.
+ * Near the middle of the island, on top of whatever is there, and never in the sea —
+ * a first ten seconds spent swimming out of the ocean is a bad opening. Different
+ * people get slightly different spots so a busy world does not stack everybody on
+ * one block.
  */
-export function hurt(p: { hp: number; down: number }, amount: number): boolean {
-  if (p.down > 0) return false; // already flat; you cannot be kept there
-  p.hp = Math.max(0, p.hp - amount);
-  if (p.hp > 0) return false;
-  p.down = KNOCKDOWN_MS / 1000;
-  return true;
+export function spawnPoint(rand: number): { x: number; y: number; z: number } {
+  generate();
+  const cx = WORLD_X / 2;
+  const cz = WORLD_Z / 2;
+  for (let r = 0; r < 48; r++) {
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const a = (rand * 360 + attempt * 47 + r * 13) * (Math.PI / 180);
+      const x = Math.floor(cx + Math.cos(a) * r);
+      const z = Math.floor(cz + Math.sin(a) * r);
+      if (x < 2 || z < 2 || x >= WORLD_X - 2 || z >= WORLD_Z - 2) continue;
+      const y = surfaceY(x, z);
+      if (y <= SEA_LEVEL) continue;
+      /*
+       * And it has to be able to see the sky.
+       *
+       * `surfaceY` finds the highest block in a column, which is not the same thing:
+       * where a cave has broken through to the surface, the highest block is at the
+       * bottom of the hole and standing on it is standing in a pitch-dark room with
+       * a ceiling. Which is a memorable first ten seconds of a game and not in a good
+       * way. Full daylight overhead is the whole test, and it costs one array read.
+       */
+      if (skyLight(x, y, z) < 15) continue;
+      return { x: x + 0.5, y, z: z + 0.5 };
+    }
+  }
+  return { x: cx, y: WORLD_Y - 2, z: cz };
 }
 
-/** Count off the knockdown and the swing, and stand them back up when it runs out. */
-export function stepTimers(p: { hp: number; down: number; swing: number; moving: boolean }, dt: number): void {
-  if (p.swing > 0) p.swing = Math.max(0, p.swing - dt);
-  if (p.down <= 0) return;
-  p.down = Math.max(0, p.down - dt);
-  p.moving = false;
-  if (p.down === 0) p.hp = MAX_HP;
-}
-
-/**
- * Is `target` inside a swing thrown from `from` along `aim`?
- *
- * A cone rather than a circle, so where you are facing decides what you connect
- * with — otherwise a swing is an area attack and standing behind somebody is worth
- * nothing.
- */
-export function inSwing(
-  from: { x: number; y: number },
-  aim: number,
-  target: { x: number; y: number; z: number; down: number },
-): boolean {
-  if (target.down > 0) return false;
-  const dx = target.x - from.x;
-  const dy = target.y - from.y;
-  const d = Math.hypot(dx, dy);
-  if (d > MELEE_RANGE + BODY_W / 2) return false;
-  // Point blank counts whatever way you are facing; there is no behind at zero.
-  if (d < 1) return true;
-  // Airborne is out of reach in one direction only: a swing is at chest height, so
-  // somebody at the top of a jump is over it.
-  if (target.z > BODY_H) return false;
-  const delta = Math.abs(Math.atan2(Math.sin(Math.atan2(dy, dx) - aim), Math.cos(Math.atan2(dy, dx) - aim)));
-  return delta <= MELEE_ARC / 2;
-}
-
-/** Eat one. Returns false if there was nothing to mend, so the berry stays put. */
-export function eat(p: { hp: number }): boolean {
-  if (p.hp >= MAX_HP) return false;
-  p.hp = Math.min(MAX_HP, p.hp + BERRY_HEAL);
-  return true;
-}
-
-/** A dry, tree-free spot near the middle of the map to arrive at. */
-export function spawnPoint(rand: number): { x: number; y: number } {
-  const a = rand * Math.PI * 2;
-  const r = 8 + ((rand * 37) % 30);
-  return clampToWorld(WORLD_PX_W / 2 + Math.cos(a) * r, WORLD_PX_H / 2 + Math.sin(a) * r);
+/** The first empty y above the ground in a column — where a body would stand. */
+export function surfaceY(x: number, z: number): number {
+  for (let y = WORLD_Y - 1; y >= 0; y--) {
+    const b = getBlock(x, y, z);
+    if (BLOCKS[b].solid || BLOCKS[b].liquid) return y + 1;
+  }
+  return 1;
 }

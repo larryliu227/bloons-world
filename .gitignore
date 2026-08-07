@@ -4,3 +4,8 @@ dist/
 .DS_Store
 .env
 .vite/
+# The world: every block anybody has changed. Local to whoever is running it.
+world-edits.json
+world-edits.json.tmp
+# Scratch space for headless browser probes.
+.probe/

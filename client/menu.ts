@@ -1,19 +1,17 @@
 /**
  * BLOONS WORLD — the title screen.
  *
- * Two jobs: ask who you are, and be the one place a failed connection can be
- * reported without the world already being on screen behind it.
+ * Three jobs: ask who you are, be the one place a failed connection can be reported
+ * without the world already being on screen behind it, and hold the loading bar.
  *
  * It does NOT connect on load. The socket is opened when ENTER WORLD is pressed,
- * because connecting earlier would stand you at spawn — visible to everybody,
- * named, motionless — while you were still reading the title. A world full of
- * people who have not arrived yet is worse than a title screen that takes a
- * moment.
+ * because connecting earlier would stand you in the world — visible to everybody,
+ * named, motionless — while you were still reading the title.
  *
- * The screen is dismissed by `main`, not by the button, and only once the first
- * snapshot has landed. Pressing ENTER WORLD and getting an empty grey field
- * while the socket is still opening reads as a broken game; waiting on the title
- * for another 200ms reads as loading.
+ * And it is dismissed by `main`, not by the button, and only once the world has been
+ * both caught up and turned into triangles. Pressing ENTER WORLD and getting a grey
+ * field for two seconds reads as a broken game; waiting on the title with a bar that
+ * is moving reads as loading, which is what it is.
  */
 
 import type { Status } from './net.js';
@@ -28,7 +26,10 @@ export class Menu {
   private nameBox: HTMLInputElement;
   private go: HTMLButtonElement;
   private note: HTMLElement;
+  private barWrap: HTMLElement;
+  private bar: HTMLElement;
   private waiting = false;
+  private shownNote = '';
 
   constructor(name: string) {
     this.el = document.createElement('div');
@@ -38,7 +39,7 @@ export class Menu {
     card.className = 'menu-card';
 
     card.appendChild(text('h1', 'brand', 'BLOONS WORLD'));
-    card.appendChild(text('p', 'tagline', 'One world. Everybody is in it.'));
+    card.appendChild(text('p', 'tagline', 'One island, made of blocks. Everybody is in it.'));
 
     this.nameBox = document.createElement('input');
     this.nameBox.className = 'menu-name';
@@ -62,27 +63,32 @@ export class Menu {
     this.note = text('p', 'menu-note', '');
     card.appendChild(this.note);
 
+    this.barWrap = document.createElement('div');
+    this.barWrap.className = 'menu-bar';
+    this.bar = document.createElement('i');
+    this.barWrap.appendChild(this.bar);
+    this.barWrap.hidden = true;
+    card.appendChild(this.barWrap);
+
     const keys = document.createElement('div');
     keys.className = 'menu-keys';
-    keys.appendChild(text('p', '', 'WASD or ARROWS to walk · SPACE to jump'));
-    keys.appendChild(text('p', '', 'V to stand in it · MOUSE to look'));
-    keys.appendChild(text('p', '', 'F to swing · R to throw a stone'));
-    keys.appendChild(text('p', '', 'On a phone, press anywhere to steer'));
-    // The short list is the reminder; ? is where the whole thing lives, so nobody
-    // has to have read the title screen to find out what the game does.
-    keys.appendChild(text('p', '', '? for everything else, any time'));
+    keys.appendChild(text('p', '', 'WASD to walk · SPACE to jump · SHIFT to run'));
+    keys.appendChild(text('p', '', 'HOLD LEFT to dig · RIGHT CLICK to build'));
+    keys.appendChild(text('p', '', '1–9 or the WHEEL to pick a block · E for everything you have'));
+    keys.appendChild(text('p', '', 'On a phone, press the left half to steer'));
+    keys.appendChild(text('p', '', '? for the rest of it, any time'));
     card.appendChild(keys);
 
     this.el.appendChild(card);
 
-    // Enter from the name field is the same as pressing the button — it is the
-    // last thing you touch before you want to be in.
+    // Enter from the name field is the same as pressing the button — it is the last
+    // thing you touch before you want to be in.
     this.nameBox.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') this.enter();
     });
   }
 
-  /** The name as typed, or a fallback so nobody is ever forced to fill this in. */
+  /** The name as typed, or nothing, so the button can refuse. */
   name(): string {
     return this.nameBox.value.trim().slice(0, NAME_MAX);
   }
@@ -104,21 +110,36 @@ export class Menu {
   /**
    * Reflect the socket while the title is still up.
    *
-   * A failure has to put the button back. Otherwise a dropped connection leaves
-   * a dead ENTER WORLD and the only way on is a reload, which is exactly the
-   * thing the retry loop is already doing invisibly.
+   * A failure has to put the button back. Otherwise a dropped connection leaves a
+   * dead ENTER WORLD and the only way on is a reload, which is exactly the thing the
+   * retry loop is already doing invisibly.
    */
   setStatus(s: Status, detail: string): void {
     if (!this.waiting) return;
-    this.note.textContent = detail;
+    if (detail !== this.shownNote) {
+      this.shownNote = detail;
+      this.note.textContent = detail;
+    }
     this.note.dataset.state = s;
     if (s === 'offline') {
       this.waiting = false;
       this.go.disabled = false;
+      this.barWrap.hidden = true;
     }
   }
 
-  /** Take the title away. `main` calls this on the first snapshot, not the click. */
+  /** How far through arriving, 0..1, with an optional replacement for the caption. */
+  setProgress(fraction: number, label?: string): void {
+    if (!this.waiting) return;
+    this.barWrap.hidden = false;
+    this.bar.style.width = `${Math.max(2, Math.min(100, fraction * 100))}%`;
+    if (label && label !== this.shownNote) {
+      this.shownNote = label;
+      this.note.textContent = label;
+    }
+  }
+
+  /** Take the title away. `main` calls this once the world is ready to stand in. */
   dismiss(): void {
     this.el.classList.add('gone');
     this.nameBox.blur();

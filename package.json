@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "BLOONS WORLD — a 2D pixel world you walk around in, together.",
+  "description": "BLOONS WORLD — a block world you dig, build and stand around in, together.",
   "scripts": {
     "dev": "concurrently -n server,client -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch server/index.ts",

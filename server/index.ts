@@ -5,12 +5,16 @@
  * everybody and ships the result. In production the same port serves the built
  * client, so deploying is `npm run build && npm start` and nothing else.
  *
- * There are no rooms. There is one world and everybody is in it.
+ * There are no rooms. There is one world and everybody is in it, and because the
+ * terrain is generated from shared code rather than stored, the only thing this
+ * process actually owns is the DIFFERENCE: every block anybody has dug out or put
+ * down since it started. That list is the save file, it is what a joining client is
+ * sent, and it is small enough that both of those are true at once.
  */
 
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -18,48 +22,66 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 import { PROTOCOL_VERSION, decode, encode } from '../shared/protocol.js';
 import type { ClientMsg, ServerMsg } from '../shared/protocol.js';
+import { AIR, BLOCKS, RECIPES, blockDef, canCraft } from '../shared/blocks.js';
 import {
-  BERRY,
-  MAX_CARRY,
-  MAX_HP,
-  MELEE_COOLDOWN,
-  MELEE_DAMAGE,
-  PEBBLE_DAMAGE,
-  PEBBLE_RANGE,
-  PEBBLE_SPEED,
-  PEBBLE_HIT_R,
-  PICKUP_R,
-  REGROW_MS,
-  SWING_MS,
-  THROW_COOLDOWN,
+  DAY_MS,
+  EYE_H,
+  REACH,
   TICK_MS,
   TICK_RATE,
-  eat,
-  hurt,
-  inSwing,
-  items,
+  bodyOverlapsBlock,
+  generate,
+  getBlock,
+  idx,
+  pristineBlock,
+  relightAll,
+  setBlock,
+  setBlockRaw,
   spawnPoint,
   step,
-  stepStone,
-  stepTimers,
 } from '../shared/world.js';
-import type { Player, Stone } from '../shared/world.js';
+import type { Player } from '../shared/world.js';
 
 const PORT = readPort();
 const PRODUCTION = process.env.NODE_ENV === 'production';
 const CLIENT_DIR = resolve(process.cwd(), 'dist');
+const SAVE_PATH = resolve(process.cwd(), process.env.WORLD_SAVE ?? 'world-edits.json');
 const MAX_SOCKETS = 256;
 const MAX_MSG_BYTES = 2048;
 /** A socket that never says `hello` is dropped rather than held open forever. */
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const NAME_MAX = 16;
+/**
+ * Edits per message when a joining client is being caught up.
+ *
+ * Two thousand pairs is about 30KB of JSON, which arrives as one frame without
+ * making the socket's buffer somebody's problem, and lets the title screen show a
+ * real fraction instead of a spinner.
+ */
+const SYNC_BATCH = 2000;
+
+/** How much of a block's dig time a client is allowed to be early by. */
+const DIG_LENIENCE = 0.72;
+/** The fastest anybody may put blocks down, in milliseconds between them. */
+const PLACE_COOLDOWN = 120;
+/**
+ * How long a silent client keeps walking.
+ *
+ * Half a second is ten input frames — long enough that ordinary jitter and a dropped
+ * packet or two never stutter anybody, short enough that a tab which has stopped
+ * being drawn stops moving before it has gone anywhere. A browser throttles
+ * `requestAnimationFrame` to nothing in a background tab, so this is not an edge case:
+ * it is what happens every time somebody switches to another window mid-stride.
+ */
+const INPUT_TIMEOUT_MS = 500;
 
 interface Session {
   socket: WebSocket;
   player: Player;
-  /** Latest input vector from this client. Applied every tick until it changes. */
-  inx: number;
-  iny: number;
+  /** Latest intent from this client. Applied every tick until it changes. */
+  fwd: number;
+  strafe: number;
+  sprint: boolean;
   /**
    * A jump waiting to be spent on the next tick.
    *
@@ -69,14 +91,45 @@ interface Session {
    * the instant you landed — so you would bunny-hop forever by leaning on space.
    */
   jump: boolean;
+  /**
+   * When this client last said anything about where it wants to go.
+   *
+   * Input is a LEVEL, not an event: "I am pushing forward" stays true until a later
+   * message says otherwise. Which is right, and it means a client that stops talking
+   * leaves its last intent standing — so backgrounding the tab mid-stride walks you
+   * out to sea, and so does a network stall, and so does closing the laptop. Nobody
+   * moves who has not said something recently. See `INPUT_TIMEOUT_MS`.
+   */
+  heardAt: number;
   helloDone: boolean;
-  /** When they may swing and throw again. Rate limiting IS the anti-cheat here. */
-  swingAt: number;
-  throwAt: number;
+  /** What they are carrying: block id to count. */
+  have: Map<number, number>;
+  /** Rate limits. These ARE the anti-cheat for building. */
+  digReadyAt: number;
+  placeReadyAt: number;
 }
 
 const sessions = new Map<string, Session>();
 let tick = 0;
+
+/*
+ * Every block that differs from the generated world, as index -> block id.
+ *
+ * An entry is DELETED rather than written when a block goes back to what the
+ * generator would have made — fill a hole back in and the world forgets you dug it.
+ * Without that the save file only ever grows, and a world where everybody has been
+ * tidying up would be as big as one nobody had.
+ */
+const edits = new Map<number, number>();
+/** Edits made this tick, flat as [index, block, …], sent to everybody at the end of it. */
+let pending: number[] = [];
+let saveDirty = false;
+
+// ---------------------------------------------------------------------------
+// Boot
+
+generate();
+loadWorld();
 
 // ---------------------------------------------------------------------------
 // HTTP
@@ -89,6 +142,7 @@ const http = createServer((req, res) => {
       protocol: PROTOCOL_VERSION,
       uptimeSec: Math.round(process.uptime()),
       players: sessions.size,
+      edits: edits.size,
       tick,
     });
     return;
@@ -108,31 +162,32 @@ wss.on('connection', (socket: WebSocket) => {
     return;
   }
   const id = `w_${randomBytes(6).toString('base64url')}`;
-  // Somewhere dry and clear near the middle, rather than all on one pixel — and
-  // never in a lake, which would be a first ten seconds spent wading out of one.
   const at = spawnPoint(Math.random());
   const session: Session = {
     socket,
-    inx: 0,
-    iny: 0,
+    fwd: 0,
+    strafe: 0,
+    sprint: false,
     jump: false,
+    heardAt: 0,
     helloDone: false,
-    swingAt: 0,
-    throwAt: 0,
+    have: new Map(),
+    digReadyAt: 0,
+    placeReadyAt: 0,
     player: {
       id,
       name: 'wanderer',
       x: at.x,
       y: at.y,
-      dir: 'down',
+      z: at.z,
+      vy: 0,
+      yaw: Math.random() * Math.PI * 2,
+      pitch: 0,
+      onGround: false,
+      inWater: false,
       moving: false,
-      z: 0,
-      vz: 0,
+      sprinting: false,
       hue: Math.floor(Math.random() * 360),
-      hp: MAX_HP,
-      pebbles: 0,
-      down: 0,
-      swing: 0,
     },
   };
 
@@ -173,30 +228,36 @@ function route(s: Session, msg: ClientMsg): void {
     s.player.name = sanitizeName(msg.name);
     s.helloDone = true;
     sessions.set(s.player.id, s);
-    send(s.socket, { t: 'welcome', id: s.player.id, version: PROTOCOL_VERSION });
-    console.log(`[world] ${s.player.name} arrived — ${sessions.size} here`);
+    send(s.socket, { t: 'welcome', id: s.player.id, version: PROTOCOL_VERSION, edits: edits.size });
+    syncWorld(s);
+    sendInventory(s);
+    console.log(`[world] ${s.player.name} arrived — ${sessions.size} here, ${edits.size} blocks changed`);
     return;
   }
 
   switch (msg.t) {
     case 'input':
       /*
-       * Clamped, because this is the one number a client controls and the whole
-       * anti-cheat surface of a walking game: unclamped, `{x: 50}` is a speed hack.
+       * Clamped, because these are the numbers a client controls and the whole
+       * anti-cheat surface of walking: unclamped, `{f: 50}` is a speed hack.
        */
-      s.inx = clamp1(msg.x);
-      s.iny = clamp1(msg.y);
-      // Latch it. The tick clears it, so one press is one jump however many input
+      s.fwd = clamp1(msg.f);
+      s.strafe = clamp1(msg.s);
+      s.player.yaw = finite(msg.yaw);
+      s.player.pitch = Math.max(-1.55, Math.min(1.55, finite(msg.pitch)));
+      s.sprint = msg.sprint === true;
+      s.heardAt = performance.now();
+      // Latched. The tick clears it, so one press is one jump however many input
       // frames carry the flag.
       if (msg.jump === true) s.jump = true;
       return;
 
-    case 'hit':
-      swing(s, msg.a);
+    case 'edit':
+      applyEdit(s, msg.x, msg.y, msg.z, msg.b);
       return;
 
-    case 'throw':
-      lob(s, msg.a);
+    case 'craft':
+      craft(s, msg.r);
       return;
 
     case 'rename':
@@ -211,71 +272,144 @@ function route(s: Session, msg: ClientMsg): void {
 }
 
 // ---------------------------------------------------------------------------
-// Fighting
+// Catching a new arrival up
 //
-// Every one of these decisions is the server's. The client says which way it is
-// pointing and nothing else — not whether it may attack, not who was in range, not
-// what it cost them. A client that could report its own hits could report all of
-// them.
+// They already have the terrain — they generated it from the same code this process
+// did. All they are missing is what everybody has done to it since.
 
-/** Stones in the air, and the counter that names them. */
-const stones: Stone[] = [];
-let stoneId = 0;
+function syncWorld(s: Session): void {
+  let batch: number[] = [];
+  for (const [index, b] of edits) {
+    batch.push(index, b);
+    if (batch.length >= SYNC_BATCH * 2) {
+      send(s.socket, { t: 'edits', d: batch, sync: true });
+      batch = [];
+    }
+  }
+  if (batch.length > 0) send(s.socket, { t: 'edits', d: batch, sync: true });
+  send(s.socket, { t: 'ready' });
+}
+
+// ---------------------------------------------------------------------------
+// Digging and building
+//
+// Every one of these decisions is the server's. The client says which block and what
+// to make it; the server decides whether that was possible. A client that could
+// assert its own edits could rewrite the world, and a client that could assert its
+// own inventory could build a mountain out of nothing.
+
+function applyEdit(s: Session, rx: unknown, ry: unknown, rz: unknown, rb: unknown): void {
+  const x = int(rx);
+  const y = int(ry);
+  const z = int(rz);
+  const b = int(rb);
+  if (x === null || y === null || z === null || b === null) return;
+  if (b < 0 || b >= BLOCKS.length) return;
+
+  const p = s.player;
+  // Reach, measured from the eye to the middle of the block, with a block of slack
+  // for the fact that the position the server has is a moment behind the one the
+  // client aimed from.
+  const dist = Math.hypot(x + 0.5 - p.x, y + 0.5 - (p.y + EYE_H), z + 0.5 - p.z);
+  if (dist > REACH + 1.2) return correct(s, x, y, z);
+
+  const now = performance.now();
+  const existing = getBlock(x, y, z);
+
+  if (b === AIR) {
+    const def = blockDef(existing);
+    if (existing === AIR || !Number.isFinite(def.hardness)) return correct(s, x, y, z);
+    /*
+     * Was there time to dig it? The client is the thing counting — it is holding the
+     * button and drawing the cracks — but a client that reports its own dig times
+     * could report all of them, so the server keeps its own clock and refuses
+     * anything that arrives faster than the block allows. The lenience is for
+     * latency and for the client's frame rate, not for the player.
+     */
+    if (now < s.digReadyAt) return correct(s, x, y, z);
+    /*
+     * The world is changed BEFORE anybody is paid for it, and the payment only
+     * happens if it actually changed. The other order looks identical and is not:
+     * placing tall grass onto tall grass is a legal-looking edit that changes
+     * nothing, and charging for it first means the block leaves your pockets and
+     * does not arrive anywhere. Every accounting bug in a game like this is some
+     * version of taking the money before delivering the goods.
+     */
+    if (!setBlock(x, y, z, AIR)) return;
+    s.digReadyAt = now + def.hardness * 1000 * DIG_LENIENCE;
+    if (def.drop !== AIR) give(s, def.drop, 1);
+  } else {
+    if (now < s.placeReadyAt) return correct(s, x, y, z);
+    if (!blockDef(existing).replaceable) return correct(s, x, y, z);
+    if ((s.have.get(b) ?? 0) <= 0) return correct(s, x, y, z);
+    // Never build a block into somebody — including yourself, which is the common
+    // case: aim at your own feet and the block would land where you are standing.
+    for (const other of sessions.values()) {
+      const o = other.player;
+      if (bodyOverlapsBlock(o.x, o.y, o.z, x, y, z)) return correct(s, x, y, z);
+    }
+    if (!setBlock(x, y, z, b)) return correct(s, x, y, z);
+    s.placeReadyAt = now + PLACE_COOLDOWN;
+    take(s, b, 1);
+  }
+
+  const index = idx(x, y, z);
+  // Back to what the generator would have made? Then it is not an edit any more.
+  if (b === pristineBlock(index)) edits.delete(index);
+  else edits.set(index, b);
+  pending.push(index, b);
+  saveDirty = true;
+}
 
 /**
- * Which item indices are picked, and when each grows back.
+ * Tell one client what a block ACTUALLY is.
  *
- * Keyed by index into the shared `items()` list, which both sides generate
- * identically — so what goes on the wire is a handful of numbers rather than three
- * hundred positions twenty times a second.
+ * The client applies its own digs and builds the instant you click, because waiting
+ * a round trip to see a block break feels like a broken game. That means a refusal
+ * has to be undone, and the honest way to undo it is to state the truth rather than
+ * to send a "no" the client has to interpret.
  */
-const takenUntil = new Map<number, number>();
+function correct(s: Session, x: number, y: number, z: number): void {
+  send(s.socket, { t: 'edits', d: [idx(x, y, z), getBlock(x, y, z)] });
+}
 
-function swing(s: Session, aim: number): void {
-  const now = performance.now();
-  if (s.player.down > 0 || now < s.swingAt) return;
-  s.swingAt = now + MELEE_COOLDOWN * 1000;
-  s.player.swing = SWING_MS / 1000;
-  const a = safeAngle(aim);
-  for (const other of sessions.values()) {
-    if (other === s || !other.helloDone) continue;
-    if (!inSwing(s.player, a, other.player)) continue;
-    if (hurt(other.player, MELEE_DAMAGE)) knockedDown(s.player, other.player);
+function give(s: Session, b: number, n: number): void {
+  s.have.set(b, (s.have.get(b) ?? 0) + n);
+  sendInventory(s);
+}
+
+function take(s: Session, b: number, n: number): void {
+  const left = (s.have.get(b) ?? 0) - n;
+  if (left > 0) s.have.set(b, left);
+  else s.have.delete(b);
+  sendInventory(s);
+}
+
+function craft(s: Session, r: unknown): void {
+  const i = int(r);
+  if (i === null || i < 0 || i >= RECIPES.length) return;
+  const recipe = RECIPES[i];
+  if (!canCraft(s.have, recipe)) return;
+  for (const [id, n] of recipe.needs) {
+    const left = (s.have.get(id) ?? 0) - n;
+    if (left > 0) s.have.set(id, left);
+    else s.have.delete(id);
   }
+  s.have.set(recipe.gives[0], (s.have.get(recipe.gives[0]) ?? 0) + recipe.gives[1]);
+  sendInventory(s);
 }
 
-function lob(s: Session, aim: number): void {
-  const now = performance.now();
-  if (s.player.down > 0 || now < s.throwAt || s.player.pebbles <= 0) return;
-  s.throwAt = now + THROW_COOLDOWN * 1000;
-  s.player.pebbles -= 1;
-  const a = safeAngle(aim);
-  stones.push({
-    id: ++stoneId,
-    by: s.player.id,
-    // Leaves the hand, not the feet — otherwise the first thing every stone hits is
-    // the ground the thrower is standing on.
-    x: s.player.x + Math.cos(a) * 6,
-    y: s.player.y + Math.sin(a) * 6,
-    vx: Math.cos(a) * PEBBLE_SPEED,
-    vy: Math.sin(a) * PEBBLE_SPEED,
-    left: PEBBLE_RANGE,
-  });
-}
-
-function knockedDown(by: Player, who: Player): void {
-  console.log(`[world] ${by.name} put ${who.name} on the ground`);
-}
-
-/** A finite angle, or straight ahead. `NaN` here would put a stone nowhere at all. */
-function safeAngle(a: number): number {
-  return Number.isFinite(a) ? a : 0;
+function sendInventory(s: Session): void {
+  const d: number[] = [];
+  for (const [b, n] of s.have) d.push(b, n);
+  send(s.socket, { t: 'inv', d });
 }
 
 // ---------------------------------------------------------------------------
 // The world loop
 
 let lastAt = performance.now();
+const startedAt = Date.now();
 
 setInterval(() => {
   const now = performance.now();
@@ -285,66 +419,107 @@ setInterval(() => {
   tick += 1;
 
   const live = [...sessions.values()];
-  const world = items();
-
   for (const s of live) {
-    stepTimers(s.player, dt);
-    if (s.player.down > 0) {
-      // Flat on your back: no walking, and the jump you were holding is forgotten.
-      s.jump = false;
-      continue;
-    }
-    // Everybody else's body, so people stop at each other instead of overlapping.
-    const others = live.filter((o) => o !== s).map((o) => o.player);
-    step(s.player, s.inx, s.iny, dt, s.jump, others);
+    // Gravity still applies to somebody who has gone quiet — they should land, not
+    // hang in the air — but they do not keep walking. See `Session.heardAt`.
+    const listening = now - s.heardAt < INPUT_TIMEOUT_MS;
+    const inp = listening
+      ? { fwd: s.fwd, strafe: s.strafe, jump: s.jump, sprint: s.sprint }
+      : { fwd: 0, strafe: 0, jump: false, sprint: false };
+    step(s.player, inp, dt);
     s.jump = false; // consumed — see `Session.jump`
-
-    // Anything lying where they are walking. Berries are only taken if they would
-    // mend something, so a full player walks over them and leaves them for whoever
-    // needs one.
-    for (let i = 0; i < world.length; i++) {
-      if (takenUntil.has(i)) continue;
-      const it = world[i];
-      if (Math.hypot(it.x - s.player.x, it.y - s.player.y) > PICKUP_R) continue;
-      if (it.kind === BERRY) {
-        if (eat(s.player)) takenUntil.set(i, now + REGROW_MS);
-      } else if (s.player.pebbles < MAX_CARRY) {
-        s.player.pebbles += 1;
-        takenUntil.set(i, now + REGROW_MS);
-      }
-    }
-  }
-
-  for (const [i, at] of takenUntil) if (now >= at) takenUntil.delete(i);
-
-  // Stones, last, so they meet everybody where this tick left them.
-  for (let i = stones.length - 1; i >= 0; i--) {
-    const stone = stones[i];
-    let spent = !stepStone(stone, dt);
-    if (!spent) {
-      for (const s of live) {
-        if (s.player.id === stone.by || s.player.down > 0) continue;
-        if (Math.hypot(s.player.x - stone.x, s.player.y - stone.y) > PEBBLE_HIT_R) continue;
-        // A stone passes under somebody at the top of a jump.
-        if (s.player.z > 14) continue;
-        if (hurt(s.player, PEBBLE_DAMAGE)) {
-          const thrower = sessions.get(stone.by);
-          if (thrower) knockedDown(thrower.player, s.player);
-        }
-        spent = true;
-        break;
-      }
-    }
-    if (spent) stones.splice(i, 1);
   }
 
   // Serialise once, send to everyone. Every socket gets identical bytes.
   const players = live.map((s) => s.player);
-  const frame = encode({ t: 'state', tick, players, stones, gone: [...takenUntil.keys()] });
+  const frame = encode({ t: 'state', tick, day: dayFraction(), players });
+  const changes = pending.length > 0 ? encode({ t: 'edits', d: pending }) : null;
+  pending = [];
   for (const s of live) {
-    if (s.socket.readyState === WebSocket.OPEN) s.socket.send(frame);
+    if (s.socket.readyState !== WebSocket.OPEN) continue;
+    s.socket.send(frame);
+    if (changes) s.socket.send(changes);
   }
 }, TICK_MS);
+
+/**
+ * Where the sun is, 0..1 across a whole day.
+ *
+ * Driven by the wall clock rather than by the tick count, so a server that stalled
+ * for a minute does not owe anybody a minute of daylight, and two servers restarted
+ * at different times still agree on roughly what time it is. It starts a third of
+ * the way through the morning, because arriving in the dark is a bad opening.
+ */
+function dayFraction(): number {
+  // `WORLD_TIME=0.9` pins it, which is the only way to look at the stars without
+  // waiting six minutes for them, and the only way to screenshot a sunset twice.
+  if (FIXED_TIME !== null) return FIXED_TIME;
+  return (((Date.now() - startedAt) / DAY_MS) + 0.28) % 1;
+}
+
+const FIXED_TIME = (() => {
+  const n = Number.parseFloat(process.env.WORLD_TIME ?? '');
+  return Number.isFinite(n) ? ((n % 1) + 1) % 1 : null;
+})();
+
+// ---------------------------------------------------------------------------
+// The save file
+//
+// One flat array of [index, block, …] — the same shape that goes on the wire, for
+// the same reason: it is three times smaller than the readable version and there
+// are tens of thousands of them.
+
+function loadWorld(): void {
+  let raw: string;
+  try {
+    raw = readFileSync(SAVE_PATH, 'utf8');
+  } catch {
+    console.log('[world] no save file — starting from the generated world');
+    return;
+  }
+  try {
+    const parsed = JSON.parse(raw) as { v?: string; d?: number[] };
+    if (parsed.v !== PROTOCOL_VERSION) {
+      // A block id meant something else in an older protocol, so replaying those
+      // numbers would put the wrong things in the right holes.
+      console.warn(`[world] save is ${parsed.v}, we speak ${PROTOCOL_VERSION} — ignoring it`);
+      return;
+    }
+    const d = parsed.d ?? [];
+    for (let i = 0; i + 1 < d.length; i += 2) {
+      edits.set(d[i], d[i + 1]);
+      setBlockRaw(d[i], d[i + 1]);
+    }
+    /*
+     * One relight at the end rather than one per edit. Ten thousand incremental
+     * light updates is about four orders of magnitude more work than lighting the
+     * whole world once, and the whole world takes a fraction of a second.
+     */
+    if (d.length > 0) relightAll();
+    console.log(`[world] loaded ${edits.size} changed blocks from ${SAVE_PATH}`);
+  } catch (err) {
+    console.warn(`[world] could not read the save file: ${(err as Error).message}`);
+  }
+}
+
+function saveWorld(): void {
+  if (!saveDirty) return;
+  saveDirty = false;
+  const d: number[] = [];
+  for (const [index, b] of edits) d.push(index, b);
+  const tmp = `${SAVE_PATH}.tmp`;
+  try {
+    // Write beside it and rename, so a process killed mid-write leaves the last
+    // good save rather than half of a new one.
+    writeFileSync(tmp, JSON.stringify({ v: PROTOCOL_VERSION, d }));
+    renameSync(tmp, SAVE_PATH);
+  } catch (err) {
+    console.warn(`[world] could not save: ${(err as Error).message}`);
+  }
+}
+
+const saver = setInterval(saveWorld, 20_000);
+saver.unref?.();
 
 // ---------------------------------------------------------------------------
 // Static client (production only)
@@ -393,7 +568,9 @@ async function serveStatic(pathname: string, req: IncomingMessage, res: ServerRe
     'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
   });
   if (req.method === 'HEAD') return void res.end();
-  createReadStream(filePath).on('error', () => res.destroy()).pipe(res);
+  createReadStream(filePath)
+    .on('error', () => res.destroy())
+    .pipe(res);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,10 +584,19 @@ function clamp1(v: unknown): number {
   return Math.min(1, Math.max(-1, n));
 }
 
+function finite(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+/** A whole number, or null for anything a hostile client might have sent instead. */
+function int(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) ? v : null;
+}
+
 function sanitizeName(raw: unknown): string {
   const cleaned = String(raw ?? '')
-    // Control characters, written as escapes: literal ones in the source make
-    // git treat the whole file as binary and every diff of it useless.
+    // Control characters, written as escapes: literal ones in the source make git
+    // treat the whole file as binary and every diff of it useless.
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -442,10 +628,16 @@ function readPort(): number {
   return Number.isInteger(n) && n > 0 && n < 65536 ? n : 8081;
 }
 
-process.on('SIGINT', () => process.exit(0));
-process.on('SIGTERM', () => process.exit(0));
+function shutdown(): void {
+  saveWorld();
+  process.exit(0);
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 http.listen(PORT, '0.0.0.0', () => {
   console.log(`[world] listening on 0.0.0.0:${PORT} (protocol ${PROTOCOL_VERSION}, ${TICK_RATE} Hz)`);
+  console.log(`[world] saving changed blocks to ${SAVE_PATH}`);
   if (PRODUCTION) console.log(`[world] serving client from ${CLIENT_DIR}`);
 });
