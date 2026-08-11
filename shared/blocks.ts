@@ -273,6 +273,26 @@ export function ladderFor(nx: number, ny: number, nz: number): number | null {
  */
 export type ToolKind = 'none' | 'axe' | 'pick' | 'shovel' | 'blade';
 
+/**
+ * What a block SOUNDS like, which is not the same question as what it is made of.
+ *
+ * Sandstone is stone to a pickaxe and sand to an ear; leaves and long grass are
+ * different blocks and the same rustle. Nine of these covers everything, and every
+ * one of them is a different shape of noise rather than the same click at a different
+ * pitch — which is the whole difference between a game that has sound and a game that
+ * makes a noise when you click.
+ */
+export type SoundKind =
+  | 'wood'
+  | 'stone'
+  | 'dirt'
+  | 'grass'
+  | 'sand'
+  | 'gravel'
+  | 'glass'
+  | 'leaves'
+  | 'metal';
+
 export interface BlockDef {
   id: number;
   /** What the hotbar calls it. Also the key a saved world is migrated by. */
@@ -309,6 +329,8 @@ export interface BlockDef {
   tier: number;
   /** For stairs: 0 = the step is on the +x side, then +z, -x, -z. */
   facing: number;
+  /** What it sounds like to dig and to break. */
+  sound: SoundKind;
   /**
    * How much of a fall this block passes on to whoever lands on it, 0..1.
    *
@@ -337,6 +359,7 @@ function def(id: number, name: string, tex: number | [number, number, number], e
     tool: 'pick',
     tier: 0,
     facing: 0,
+    sound: 'stone',
     softness: 1,
     ...extra,
   };
@@ -362,19 +385,19 @@ const AUTHORED: BlockDef[] = [
 
   // --- soil, and everything else your hands can move. A shovel is three times
   // faster and is never required.
-  def(DIRT, 'dirt', TEX.dirt, { hardness: 0.75, tool: 'shovel', softness: 0.8 }),
-  def(GRASS, 'grass', [TEX.grassTop, TEX.dirt, TEX.grassSide], {
+  def(DIRT, 'dirt', TEX.dirt, { sound: 'dirt', hardness: 0.75, tool: 'shovel', softness: 0.8 }),
+  def(GRASS, 'grass', [TEX.grassTop, TEX.dirt, TEX.grassSide], { sound: 'grass',
     hardness: 0.9, tool: 'shovel', softness: 0.8,
   }),
-  def(SAND, 'sand', TEX.sand, { hardness: 0.75, tool: 'shovel', softness: 0.08 }),
-  def(GRAVEL, 'gravel', TEX.gravel, { hardness: 0.9, tool: 'shovel', softness: 0.55 }),
+  def(SAND, 'sand', TEX.sand, { sound: 'sand', hardness: 0.75, tool: 'shovel', softness: 0.08 }),
+  def(GRAVEL, 'gravel', TEX.gravel, { sound: 'gravel', hardness: 0.9, tool: 'shovel', softness: 0.55 }),
 
   // --- wood. Punch it. An axe is faster and that is the only difference.
-  def(LOG, 'log', [TEX.logTop, TEX.logTop, TEX.logSide], {
+  def(LOG, 'log', [TEX.logTop, TEX.logTop, TEX.logSide], { sound: 'wood',
     hardness: 3.0, tool: 'axe', softness: 0.85,
   }),
-  def(PLANKS, 'planks', TEX.planks, { hardness: 2.4, tool: 'axe', softness: 0.85 }),
-  def(LEAVES, 'leaves', TEX.leaves, {
+  def(PLANKS, 'planks', TEX.planks, { sound: 'wood', hardness: 2.4, tool: 'axe', softness: 0.85 }),
+  def(LEAVES, 'leaves', TEX.leaves, { sound: 'leaves',
     opaque: false, opacity: 1, hardness: 0.3, tool: 'none', softness: 0.18,
   }),
 
@@ -393,13 +416,13 @@ const AUTHORED: BlockDef[] = [
   def(GOLD_ORE, 'gold ore', TEX.goldOre, { hardness: 6.5, tool: 'pick', tier: 3 }),
   def(DIAMOND_ORE, 'diamond ore', TEX.diamondOre, { hardness: 7.5, tool: 'pick', tier: 3 }),
 
-  def(GLASS, 'glass', TEX.glass, { opaque: false, opacity: 0, hardness: 0.4, tool: 'none' }),
-  def(LAMP, 'lamp', TEX.lamp, { glow: 14, hardness: 0.4, tool: 'none' }),
+  def(GLASS, 'glass', TEX.glass, { sound: 'glass', opaque: false, opacity: 0, hardness: 0.4, tool: 'none' }),
+  def(LAMP, 'lamp', TEX.lamp, { sound: 'glass', glow: 14, hardness: 0.4, tool: 'none' }),
   def(BRICK, 'brick', TEX.brick, { hardness: 4.5, tool: 'pick', tier: 1 }),
   def(FURNACE, 'furnace', [TEX.furnaceTop, TEX.furnaceTop, TEX.furnaceSide], {
     hardness: 5.0, tool: 'pick', tier: 1,
   }),
-  def(WATER, 'water', TEX.water, {
+  def(WATER, 'water', TEX.water, { sound: 'dirt',
     solid: false,
     opaque: false,
     liquid: true,
@@ -411,38 +434,38 @@ const AUTHORED: BlockDef[] = [
   }),
 
   // --- things growing, and things lying about. All free, all by hand.
-  def(TALL_GRASS, 'tall grass', TEX.tallGrass, {
+  def(TALL_GRASS, 'tall grass', TEX.tallGrass, { sound: 'grass',
     shape: 'cross', solid: false, opaque: false, replaceable: true,
     opacity: 0, hardness: 0, tool: 'none',
   }),
-  def(FLOWER, 'flower', TEX.flower, {
+  def(FLOWER, 'flower', TEX.flower, { sound: 'grass',
     shape: 'cross', solid: false, opaque: false, replaceable: true,
     opacity: 0, hardness: 0, tool: 'none',
   }),
-  def(PEBBLES, 'pebbles', TEX.pebbles, {
+  def(PEBBLES, 'pebbles', TEX.pebbles, { sound: 'gravel',
     shape: 'cross', solid: false, opaque: false, replaceable: true,
     opacity: 0, hardness: 0, tool: 'none',
   }),
-  def(STICKS, 'fallen sticks', TEX.sticks, {
+  def(STICKS, 'fallen sticks', TEX.sticks, { sound: 'wood',
     shape: 'cross', solid: false, opaque: false, replaceable: true,
     opacity: 0, hardness: 0, tool: 'none',
   }),
-  def(BERRY_BUSH, 'berry bush', TEX.berryBush, {
+  def(BERRY_BUSH, 'berry bush', TEX.berryBush, { sound: 'grass',
     shape: 'cross', solid: false, opaque: false, replaceable: true,
     opacity: 0, hardness: 0, tool: 'none',
   }),
-  def(MUSHROOM, 'mushroom', TEX.mushroom, {
+  def(MUSHROOM, 'mushroom', TEX.mushroom, { sound: 'grass',
     shape: 'cross', solid: false, opaque: false, replaceable: true,
     opacity: 0, hardness: 0, tool: 'none',
   }),
 
   // --- made, never found.
-  def(SANDSTONE, 'sandstone', [TEX.sandstoneTop, TEX.sandstoneTop, TEX.sandstoneSide], {
+  def(SANDSTONE, 'sandstone', [TEX.sandstoneTop, TEX.sandstoneTop, TEX.sandstoneSide], { sound: 'sand',
     hardness: 3.2, tool: 'pick', tier: 1, softness: 0.5,
   }),
-  def(IRON_BLOCK, 'iron block', TEX.ironBlock, { hardness: 6.0, tool: 'pick', tier: 2 }),
-  def(GOLD_BLOCK, 'gold block', TEX.goldBlock, { hardness: 5.0, tool: 'pick', tier: 3 }),
-  def(DIAMOND_BLOCK, 'diamond block', TEX.diamondBlock, { hardness: 6.5, tool: 'pick', tier: 3 }),
+  def(IRON_BLOCK, 'iron block', TEX.ironBlock, { sound: 'metal', hardness: 6.0, tool: 'pick', tier: 2 }),
+  def(GOLD_BLOCK, 'gold block', TEX.goldBlock, { sound: 'metal', hardness: 5.0, tool: 'pick', tier: 3 }),
+  def(DIAMOND_BLOCK, 'diamond block', TEX.diamondBlock, { sound: 'metal', hardness: 6.5, tool: 'pick', tier: 3 }),
   def(MOSSY_COBBLE, 'mossy cobble', TEX.mossy, { hardness: 4.5, tool: 'pick', tier: 1, softness: 0.7 }),
 
   /*
@@ -452,14 +475,14 @@ const AUTHORED: BlockDef[] = [
    */
   def(SULFUR_ORE, 'sulfur ore', TEX.sulfurOre, { hardness: 6.0, tool: 'pick', tier: 2 }),
   def(NITRE_ORE, 'nitre ore', TEX.nitreOre, { hardness: 6.0, tool: 'pick', tier: 2 }),
-  def(THATCH, 'thatch', TEX.thatch, { hardness: 0.5, tool: 'none', softness: 0.03 }),
+  def(THATCH, 'thatch', TEX.thatch, { sound: 'grass', hardness: 0.5, tool: 'none', softness: 0.03 }),
 
   // --- stairs and slabs. Half-height and quarter-cut, so a building can have a way
   // up that is not a ladder of jumps.
   ...cutStone(COBBLE_SLAB, COBBLE_STAIRS, 'cobble', TEX.cobble, 4.5, 'pick', 1),
-  ...cutStone(PLANK_SLAB, PLANK_STAIRS, 'plank', TEX.planks, 2.4, 'axe', 0),
+  ...cutStone(PLANK_SLAB, PLANK_STAIRS, 'plank', TEX.planks, 2.4, 'axe', 0, 'wood'),
   ...cutStone(BRICK_SLAB, BRICK_STAIRS, 'brick', TEX.brick, 4.5, 'pick', 1),
-  ...cutStone(SANDSTONE_SLAB, SANDSTONE_STAIRS, 'sandstone', TEX.sandstoneSide, 3.2, 'pick', 1),
+  ...cutStone(SANDSTONE_SLAB, SANDSTONE_STAIRS, 'sandstone', TEX.sandstoneSide, 3.2, 'pick', 1, 'sand'),
 
   /*
    * Ladders. Not solid — you stand INSIDE the cell and hold space to go up — which is
@@ -468,7 +491,7 @@ const AUTHORED: BlockDef[] = [
    */
   ...ladders(),
 
-  def(SAPLING, 'sapling', TEX.sapling, {
+  def(SAPLING, 'sapling', TEX.sapling, { sound: 'grass',
     shape: 'cross', solid: false, opaque: false, replaceable: true,
     opacity: 0, hardness: 0, tool: 'none',
   }),
@@ -486,6 +509,7 @@ function ladders(): BlockDef[] {
       hardness: 0.4,
       tool: 'none',
       facing: f,
+      sound: 'wood',
       softness: 0.1,
     }),
   );
@@ -494,9 +518,9 @@ function ladders(): BlockDef[] {
 /** One slab and four stairs in a material. Five ids, one line. */
 function cutStone(
   slab: number, stairs: number, name: string, tex: number,
-  hardness: number, tool: ToolKind, tier: number,
+  hardness: number, tool: ToolKind, tier: number, voice: SoundKind = 'stone',
 ): BlockDef[] {
-  const common = { hardness, tool, tier, opaque: false, opacity: 0 };
+  const common = { hardness, tool, tier, opaque: false, opacity: 0, sound: voice };
   const out = [def(slab, `${name} slab`, tex, { ...common, shape: 'slab' as Shape })];
   const WAY = ['east', 'south', 'west', 'north'];
   for (let f = 0; f < 4; f++) {

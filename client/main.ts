@@ -98,16 +98,39 @@ net.onStatus = (s, detail) => {
 };
 net.onProgress = (f) => menu.setProgress(f);
 net.onInventory = (slots, cursor) => hud.setInventory(slots, cursor);
-net.onEdit = (x, y, z, was, now) => {
-  // Somebody else's dig, or the server confirming ours. Either way there is a block
-  // less in the world and it should look like it went somewhere.
-  if (was !== AIR && now === AIR) {
-    renderer.burst(x, y, z, was);
-    sound.play('break', [x + 0.5, y + 0.5, z + 0.5]);
-  } else if (now !== AIR) {
-    sound.play('place', [x + 0.5, y + 0.5, z + 0.5]);
+/**
+ * A batch of block changes, and how much of a fuss to make about them.
+ *
+ * One dug block deserves a spray and a crack. EIGHTY-EIGHT of them — which is what
+ * felling a tree is — deserves one crack and a handful of sprays, because eighty-eight
+ * simultaneous bursts is two thousand particles and eighty-eight simultaneous
+ * oscillators, and the result is not a bigger effect, it is a dropped frame and a
+ * noise like a modem.
+ */
+net.onEdits = (changes) => {
+  const broken = changes.filter((c) => c.was !== AIR && c.now === AIR);
+  const placed = changes.filter((c) => c.now !== AIR);
+
+  // Spray from a few of them, spread through the batch rather than the first few, so
+  // a felled tree comes apart along its whole length.
+  const BURSTS = 6;
+  const stride = Math.max(1, Math.ceil(broken.length / BURSTS));
+  for (let i = 0; i < broken.length; i += stride) {
+    const c = broken[i];
+    renderer.burst(c.x, c.y, c.z, c.was);
+  }
+  // One sound for the batch, from the middle of it, and it is the sound of whatever
+  // there was most of.
+  if (broken.length > 0) {
+    const mid = broken[Math.floor(broken.length / 2)];
+    sound.play(breakNoise(commonest(broken)), [mid.x + 0.5, mid.y + 0.5, mid.z + 0.5]);
+  }
+  if (placed.length > 0) {
+    const mid = placed[Math.floor(placed.length / 2)];
+    sound.play('place', [mid.x + 0.5, mid.y + 0.5, mid.z + 0.5]);
   }
 };
+
 net.onReady = () => {
   // Drain the world's dirty list into the renderer FIRST: `relightAll` marks every
   // chunk, and a queue that still has them in it when the first frame lands would
@@ -115,12 +138,32 @@ net.onReady = () => {
   renderer.collectDirty();
   meshing = true;
 };
-hud.onCraft = (r) => net.sendCraft(r);
-// The one thing the recipe list cannot work out on its own: whether you are standing
-// beside a furnace.
-hud.nearby = (block) => blockNear(me.x, me.y, me.z, block, NEAR_RADIUS);
-hud.onSlotClick = (slot, right, shift) => net.sendSlotClick(slot, right, shift);
-hud.onClosePack = () => net.sendClosePack();
+
+/** The noise a block makes when it finally gives, by what it is made of. */
+function breakNoise(block: number): string {
+  return `break-${blockDef(block).sound}`;
+}
+
+/** And the scrape while you are still working on it. */
+function digNoise(block: number): string {
+  return `dig-${blockDef(block).sound}`;
+}
+
+/** Whichever kind of block there was most of in a batch. */
+function commonest(changes: { was: number }[]): number {
+  const tally = new Map<number, number>();
+  for (const c of changes) tally.set(c.was, (tally.get(c.was) ?? 0) + 1);
+  let best = AIR;
+  let bn = 0;
+  for (const [b, n] of tally) {
+    if (n > bn) {
+      bn = n;
+      best = b;
+    }
+  }
+  return best;
+}
+
 net.onShot = (from, to, hit) => {
   renderer.tracer(from, to, hit);
   sound.play('shoot', from);
@@ -191,10 +234,21 @@ let walked = 0;
 /** A local day clock, so the sky keeps moving between snapshots. */
 let dayAt = 0.3;
 
+/**
+ * Frames per second, smoothed.
+ *
+ * On the debug line because it is the only number that answers "is it laggy", and the
+ * machine that is laggy is never the one with the profiler open. Exponentially
+ * smoothed rather than averaged over a window: a single long frame should nudge it
+ * rather than dominate it, and it should settle quickly when things change.
+ */
+let fps = 60;
+
 function loop(now: number): void {
   requestAnimationFrame(loop);
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
+  if (dt > 0) fps += (1 / dt - fps) * Math.min(1, dt * 3);
 
   /*
    * Turn the world into triangles before letting anybody into it.
@@ -342,7 +396,8 @@ function loop(now: number): void {
   hud.setHeadcount(net.last?.players.length ?? 1);
   hud.setUnderwater(underwater);
   hud.setDebug(
-    `${me.x.toFixed(1)} ${me.y.toFixed(1)} ${me.z.toFixed(1)} · ${renderer.drawnChunks}/${renderer.totalChunks} chunks · ${clock(dayAt)}`,
+    `${fps.toFixed(0)}fps · ${me.x.toFixed(0)} ${me.y.toFixed(0)} ${me.z.toFixed(0)} · ` +
+      `${renderer.drawnChunks}/${renderer.totalChunks} chunks · ${renderer.drawCalls} draws · ${clock(dayAt)}`,
   );
 }
 
@@ -511,8 +566,9 @@ function dig(target: Hit | null, dt: number): void {
   }
   digProgress += dt;
   // A scrape every couple of hundred milliseconds while the cracks spread, so digging
-  // has a rhythm rather than being silent until it suddenly is not.
-  sound.play('dig', [target.x + 0.5, target.y + 0.5, target.z + 0.5], 210);
+  // has a rhythm rather than being silent until it suddenly is not — and it is the
+  // rhythm of whatever you are actually digging.
+  sound.play(digNoise(getBlock(target.x, target.y, target.z)), [target.x + 0.5, target.y + 0.5, target.z + 0.5], 210);
   if (digProgress < need) return;
 
   const was = getBlock(target.x, target.y, target.z);

@@ -27,6 +27,15 @@ const GAIN: Record<string, number> = {
   step: 0.22,
   dig: 0.5,
   break: 0.7,
+  'dig-wood': 0.55, 'break-wood': 0.8,
+  'dig-stone': 0.5, 'break-stone': 0.75,
+  'dig-dirt': 0.5, 'break-dirt': 0.7,
+  'dig-grass': 0.4, 'break-grass': 0.55,
+  'dig-leaves': 0.4, 'break-leaves': 0.55,
+  'dig-sand': 0.45, 'break-sand': 0.6,
+  'dig-gravel': 0.5, 'break-gravel': 0.7,
+  'dig-glass': 0.5, 'break-glass': 0.8,
+  'dig-metal': 0.55, 'break-metal': 0.8,
   place: 0.6,
   pickup: 0.5,
   craft: 0.5,
@@ -144,6 +153,91 @@ export class Sound {
       case 'step':
         this.noise(out, t, 0.07, 900 + Math.random() * 500, level, 'lowpass');
         break;
+      /*
+       * Digging and breaking, once per material.
+       *
+       * Nine different SHAPES rather than one click at nine pitches, because that is
+       * what actually distinguishes them: wood is a hollow knock with a body to it,
+       * stone is a sharp crack with no body at all, sand is pure hiss, glass is a
+       * bright shatter that rings. Retuning one sound gets you nine versions of the
+       * same sound, which everybody can hear and nobody can name.
+       */
+      case 'dig-wood':
+        this.noise(out, t, 0.08, 900, level * 0.7, 'bandpass');
+        this.tone(out, t, 'triangle', 190 + Math.random() * 60, 120, 0.07, level * 0.5);
+        break;
+      case 'break-wood':
+        this.noise(out, t, 0.2, 1000, level * 0.8, 'bandpass');
+        this.tone(out, t, 'triangle', 160, 70, 0.22, level * 0.7);
+        break;
+
+      case 'dig-stone':
+        this.noise(out, t, 0.06, 2600 + Math.random() * 1200, level * 0.8, 'highpass');
+        break;
+      case 'break-stone':
+        this.noise(out, t, 0.16, 3000, level, 'highpass');
+        this.noise(out, t, 0.3, 500, level * 0.5, 'lowpass');
+        break;
+
+      case 'dig-dirt':
+        this.noise(out, t, 0.11, 420 + Math.random() * 200, level, 'lowpass');
+        break;
+      case 'break-dirt':
+        this.noise(out, t, 0.2, 380, level, 'lowpass');
+        this.tone(out, t, 'sine', 90, 50, 0.14, level * 0.5);
+        break;
+
+      case 'dig-grass':
+      case 'dig-leaves':
+        // A rustle: high, soft, and long enough to be a texture rather than a tick.
+        this.noise(out, t, 0.16, 3800 + Math.random() * 1500, level * 0.5, 'highpass');
+        break;
+      case 'break-grass':
+      case 'break-leaves':
+        this.noise(out, t, 0.26, 3200, level * 0.6, 'highpass');
+        break;
+
+      case 'dig-sand':
+        this.noise(out, t, 0.14, 5000, level * 0.55, 'highpass');
+        break;
+      case 'break-sand':
+        this.noise(out, t, 0.3, 4200, level * 0.6, 'highpass');
+        break;
+
+      case 'dig-gravel':
+        // Loose stones knocking together: three short clicks rather than one burst.
+        for (let i = 0; i < 3; i++) {
+          this.noise(out, t + i * 0.022, 0.05, 1800 + Math.random() * 1600, level * 0.5, 'bandpass');
+        }
+        break;
+      case 'break-gravel':
+        for (let i = 0; i < 5; i++) {
+          this.noise(out, t + i * 0.028, 0.07, 1500 + Math.random() * 2000, level * 0.55, 'bandpass');
+        }
+        break;
+
+      case 'dig-glass':
+        this.noise(out, t, 0.05, 7000, level * 0.7, 'highpass');
+        this.tone(out, t, 'sine', 2200, 1800, 0.05, level * 0.25);
+        break;
+      case 'break-glass':
+        // The shatter, and then the pieces landing.
+        this.noise(out, t, 0.1, 8000, level, 'highpass');
+        for (let i = 0; i < 5; i++) {
+          this.tone(out, t + i * 0.035, 'sine', 1600 + Math.random() * 2200, 900, 0.09, level * 0.2);
+        }
+        break;
+
+      case 'dig-metal':
+        this.tone(out, t, 'square', 900, 700, 0.06, level * 0.25);
+        this.noise(out, t, 0.05, 3000, level * 0.5, 'bandpass');
+        break;
+      case 'break-metal':
+        this.tone(out, t, 'square', 700, 300, 0.3, level * 0.3);
+        this.noise(out, t, 0.14, 2400, level * 0.6, 'bandpass');
+        break;
+
+      // Fallbacks, for anything that forgot to say what it was made of.
       case 'dig':
         this.noise(out, t, 0.1, 1400 + Math.random() * 900, level, 'bandpass');
         break;

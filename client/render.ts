@@ -473,6 +473,8 @@ export class Renderer {
   /** Counted for the debug line: how much of the world actually got drawn. */
   drawnChunks = 0;
   totalChunks = 0;
+  /** Draw calls issued last frame, which is the number that matters on a tablet. */
+  drawCalls = 0;
 
   constructor() {
     this.el = document.createElement('div');
@@ -1030,7 +1032,10 @@ export class Renderer {
       gl.disable(gl.CULL_FACE);
     }
 
-    if (!water) this.drawnChunks = 0;
+    if (!water) {
+      this.drawnChunks = 0;
+      this.drawCalls = 0;
+    }
     for (let ci = 0; ci < CHUNK_COUNT; ci++) {
       const slot = this.chunks[ci];
       const quads = water ? slot.waterQuads : slot.opaqueQuads;
@@ -1045,6 +1050,7 @@ export class Renderer {
       gl.uniform3f(this.chunkU.uChunk, x0, y0, z0);
       gl.bindVertexArray(vao);
       gl.drawElements(gl.TRIANGLES, quads * 6, gl.UNSIGNED_INT, 0);
+      this.drawCalls += 1;
       if (!water) this.drawnChunks += 1;
     }
 
@@ -1133,7 +1139,17 @@ export class Renderer {
     for (const m of v.mobs) {
       const stats = mobStats(m.kind);
       const dist = Math.hypot(m.x - v.x, m.y - v.y, m.z - v.z);
-      if (dist > 120) continue;
+      /*
+       * Culled at sixty-four, and simplified past twenty-four.
+       *
+       * Every animal is six boxes and therefore six draw calls with six matrix
+       * uploads, so a full island was two hundred and fifty draw calls before a single
+       * block had been drawn. A desktop shrugs; a tablet does not. Past twenty-four
+       * blocks the legs are two pixels tall and nobody can tell they are missing, so
+       * a distant cow is a body and a head — two calls instead of six.
+       */
+      if (dist > 64) continue;
+      const near = dist < 24;
       gl.uniform1f(this.entityU.uLight, this.lightAt(m.x, m.y + 0.9, m.z, sky));
       // Legs swing off distance travelled, same as a player, so everything in the
       // world walks in step with its own feet without a clock being on the wire.
@@ -1151,6 +1167,7 @@ export class Renderer {
       this.part(body, bodyY, 0, long, tall, wide, hide as [number, number, number], 0, 0);
       this.part(body, bodyY + tall * 0.15, 0, tall * 0.8, tall * 0.85, wide * 0.8,
         hide as [number, number, number], 0, 0, long / 2 + tall * 0.3);
+      if (!near) continue;
       this.part(body, bodyY + tall * 0.15, 0, 0.12, tall * 0.3, wide * 0.35,
         snout as [number, number, number], 0, 0, long / 2 + tall * 0.75);
       for (const fz of [wide * 0.32, -wide * 0.32]) {
@@ -1210,6 +1227,7 @@ export class Renderer {
     gl.uniformMatrix4fv(this.entityU.uModel, false, m);
     gl.uniform4f(this.entityU.uColor, color[0], color[1], color[2], 1);
     gl.drawElements(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0);
+    this.drawCalls += 1;
   }
 
   /** How bright it is where something is standing, for lighting a person or a hand. */

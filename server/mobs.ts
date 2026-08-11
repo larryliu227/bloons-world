@@ -16,7 +16,14 @@ import type { Body, Player } from '../shared/world.js';
 import { BLOCKS } from '../shared/blocks.js';
 
 /** How many animals the island holds at once. */
-const MAX_ANIMALS = 40;
+/*
+ * Twenty-four rather than forty.
+ *
+ * Each animal is six boxes and six draw calls, so forty of them is nearly two hundred
+ * and fifty draw calls a frame before a single block has been drawn — which a desktop
+ * shrugs at and a tablet does not. Twenty-four still reads as a populated island.
+ */
+const MAX_ANIMALS = 24;
 /** Nothing appears nearer than this to anybody, or it pops into being in your face. */
 const SPAWN_MIN_DIST = 20;
 const SPAWN_MAX_DIST = 60;
@@ -47,15 +54,20 @@ export class Mobs {
     return this.list;
   }
 
+  /** The wire shape, rounded. See the note where the state message is built. */
   snapshot(): Mob[] {
+    const r = (v: number, p: number) => {
+      const f = 10 ** p;
+      return Math.round(v * f) / f;
+    };
     return this.list.map((m) => ({
       id: m.id,
       kind: m.kind,
-      x: m.x,
-      y: m.y,
-      z: m.z,
-      yaw: m.yaw,
-      hp: m.hp,
+      x: r(m.x, 2),
+      y: r(m.y, 2),
+      z: r(m.z, 2),
+      yaw: r(m.yaw, 2),
+      hp: r(m.hp, 0),
       state: m.state,
     }));
   }

@@ -45,7 +45,16 @@ export class Net {
   /** Fired once the world is caught up and it is safe to be in it. */
   onReady: (() => void) | null = null;
   /** Fired for every block anybody changes, so the client can spray particles. */
-  onEdit: ((x: number, y: number, z: number, was: number, now: number) => void) | null = null;
+  /**
+   * Every block that changed in ONE message, together.
+   *
+   * A batch rather than one call per block, because they arrive in batches: felling a
+   * tree is eighty-eight of them in a single frame, and a callback per block meant
+   * eighty-eight particle bursts and eighty-eight break sounds fired at the same
+   * millisecond. The caller needs to see the whole lot at once to make a sensible
+   * decision about how much of that to actually do.
+   */
+  onEdits: ((changes: { x: number; y: number; z: number; was: number; now: number }[]) => void) | null = null;
   /** Fired when the server restates what is in your pockets. */
   onInventory: ((slots: number[], cursor: number[]) => void) | null = null;
   /** Fired for anything the server says made a noise somewhere. */
@@ -133,14 +142,16 @@ export class Net {
           return;
         }
         // Live: one at a time, with the light and the meshes kept honest.
+        const changes: { x: number; y: number; z: number; was: number; now: number }[] = [];
         for (let i = 0; i + 1 < d.length; i += 2) {
           const { x, y, z } = unpackIndex(d[i]);
           const now = d[i + 1];
           // Read BEFORE the change, so the break spray is the colour of the block
           // that broke rather than of the air that replaced it.
           const was = getBlock(x, y, z);
-          if (setBlock(x, y, z, now)) this.onEdit?.(x, y, z, was, now);
+          if (setBlock(x, y, z, now)) changes.push({ x, y, z, was, now });
         }
+        if (changes.length > 0) this.onEdits?.(changes);
         return;
       }
 

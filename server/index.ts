@@ -1140,9 +1140,18 @@ setInterval(() => {
   const day = dayFraction();
   mobs.tick(dt, now, live.map((s) => s.player));
 
-  // Serialise once, send to everyone. Every socket gets identical bytes.
-  const players = live.map((s) => s.player);
-  const frame = encode({ t: 'state', tick, day, players, mobs: mobs.snapshot() });
+  /*
+   * Serialise once, send to everyone. Every socket gets identical bytes.
+   *
+   * ROUNDED FIRST, and it is not cosmetic. `60.12345678901234` is eighteen characters
+   * of JSON; `60.12` is five, and the difference between them is a centimetre nobody
+   * can see. Across forty animals and a handful of players at twenty a second that
+   * was ninety-four kilobytes a second per client — most of it decimal places — and
+   * every one of those bytes had to be parsed on the main thread of whatever was
+   * drawing the game.
+   */
+  const players = live.map((s) => trim(s.player));
+  const frame = encode({ t: 'state', tick, day: round(day, 4), players, mobs: mobs.snapshot() });
   const changes = pending.length > 0 ? encode({ t: 'edits', d: pending }) : null;
   pending = [];
   for (const s of live) {
@@ -1160,6 +1169,31 @@ setInterval(() => {
  * at different times still agree on roughly what time it is. It starts a third of
  * the way through the morning, because arriving in the dark is a bad opening.
  */
+/** Two decimal places on positions, three on angles. See the note in the tick. */
+function round(v: number, places: number): number {
+  const f = 10 ** places;
+  return Math.round(v * f) / f;
+}
+
+function trim(p: Player): Player {
+  return {
+    ...p,
+    x: round(p.x, 2),
+    y: round(p.y, 2),
+    z: round(p.z, 2),
+    vy: round(p.vy, 2),
+    yaw: round(p.yaw, 3),
+    pitch: round(p.pitch, 3),
+    hp: round(p.hp, 1),
+    hunger: round(p.hunger, 1),
+    respawn: round(p.respawn, 2),
+    // Not on the wire at all: nobody else needs to know how far you just fell or how
+    // high you have been, and they were two full floats each.
+    fell: 0,
+    peakY: 0,
+  };
+}
+
 function dayFraction(): number {
   // `WORLD_TIME=0.9` pins it, which is the only way to look at the stars without
   // waiting six minutes for them, and the only way to screenshot a sunset twice.
@@ -1556,6 +1590,19 @@ function shutdown(): void {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+/*
+ * One world means one process, and two processes on one machine is a thing that
+ * happens by accident — a forgotten test server, a `npm start` in a second terminal.
+ * The second one used to die with a stack trace; it now says what is wrong, because
+ * "somebody is already the world" is a sentence and `EADDRINUSE` is not.
+ */
+http.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code !== 'EADDRINUSE') throw err;
+  console.error(`[world] port ${PORT} is already taken — another BLOONS WORLD is running.`);
+  console.error('[world] there is only ever one world. Stop that one, or start this on another PORT.');
+  process.exit(1);
+});
 
 http.listen(PORT, '0.0.0.0', () => {
   console.log(`[world] listening on 0.0.0.0:${PORT} (protocol ${PROTOCOL_VERSION}, ${TICK_RATE} Hz)`);
