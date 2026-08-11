@@ -35,7 +35,10 @@ import {
   takeDirtyChunks,
 } from '../shared/world.js';
 import type { Hit, Player } from '../shared/world.js';
+import { CHICKEN, COW, FLEE, PIG, mobStats } from '../shared/mobs.js';
+import type { Mob } from '../shared/mobs.js';
 import { AIR, BLOCKS, CRACK_STAGES, TEX, TEX_LAYERS, blockDef } from '../shared/blocks.js';
+import { isBlock, thingDef } from '../shared/items.js';
 import { TEX_SIZE, buildAtlas } from './atlas.js';
 import { MAX_QUADS, VERTEX_BYTES, buildChunk } from './mesh.js';
 import {
@@ -68,6 +71,8 @@ export interface View {
   day: number;
   /** Everybody, including you — your own body is skipped by id. */
   players: Player[];
+  /** Everything alive that is not a person. */
+  mobs: Mob[];
   meId: string;
   /** The block the crosshair is on, or null. */
   target: Hit | null;
@@ -392,6 +397,14 @@ interface ChunkGL {
   built: boolean;
 }
 
+/** A bullet's path, drawn for a moment after it has already arrived. */
+interface Tracer {
+  from: [number, number, number];
+  to: [number, number, number];
+  hit: boolean;
+  life: number;
+}
+
 interface Particle {
   x: number;
   y: number;
@@ -449,6 +462,10 @@ export class Renderer {
 
   private particles: Particle[] = [];
   private particleData = new Float32Array(0);
+  private tracers: Tracer[] = [];
+  private tracerVao: WebGLVertexArrayObject;
+  private tracerVbo: WebGLBuffer;
+  private tracerData = new Float32Array(256 * 6);
 
   private tagPool: HTMLElement[] = [];
   private dpr = 1;
@@ -512,6 +529,17 @@ export class Renderer {
     const empty = gl.createVertexArray();
     if (!empty) throw new Error('world: out of GL objects');
     this.emptyVao = empty;
+
+    const tVao = gl.createVertexArray();
+    const tVbo = gl.createBuffer();
+    if (!tVao || !tVbo) throw new Error('world: out of GL objects');
+    this.tracerVao = tVao;
+    this.tracerVbo = tVbo;
+    gl.bindVertexArray(tVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, tVbo);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.bindVertexArray(null);
 
     const pVao = gl.createVertexArray();
     const pVbo = gl.createBuffer();
@@ -691,9 +719,17 @@ export class Renderer {
     const rect = this.el.getBoundingClientRect();
     const w = Math.max(1, Math.round(rect.width));
     const h = Math.max(1, Math.round(rect.height));
-    // Capped at two: past that it is four times the pixels for a difference nobody
-    // can see on a screen held at arm's length, and this is a fill-rate-bound game.
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    /*
+     * Capped, and lower on a tablet.
+     *
+     * A retina iPad is 2732 by 2048 at full ratio, which is five and a half million
+     * pixels of a fill-rate-bound voxel renderer on a mobile GPU. At 1.5 it is three
+     * million and looks all but identical on a screen held at arm's length — and the
+     * difference between those two numbers is the difference between sixty frames and
+     * a slideshow the moment a horde turns up.
+     */
+    const coarse = window.matchMedia('(hover: none), (pointer: coarse)').matches;
+    this.dpr = Math.min(window.devicePixelRatio || 1, coarse ? 1.5 : 2);
     this.canvas.width = Math.round(w * this.dpr);
     this.canvas.height = Math.round(h * this.dpr);
     this.canvas.style.width = `${w}px`;
@@ -816,6 +852,71 @@ export class Renderer {
     if (this.particles.length > 700) this.particles.splice(0, this.particles.length - 700);
   }
 
+  /**
+   * A shot went past. Draw the line it took and throw sparks off whatever it hit.
+   *
+   * The ball itself is long gone — the server resolved it the instant the trigger
+   * went — so this is pure aftermath, which is exactly what a tracer is. Two tenths
+   * of a second is enough to see where a shot came FROM, which is the only thing
+   * worth knowing about one that has already hit you.
+   */
+  tracer(from: [number, number, number], to: [number, number, number], hit: boolean): void {
+    this.tracers.push({ from, to, hit, life: 0.22 });
+    if (this.tracers.length > 64) this.tracers.shift();
+    // Smoke at the muzzle, and a spray of whatever was on the other end.
+    for (let i = 0; i < 10; i++) {
+      this.particles.push({
+        x: from[0], y: from[1], z: from[2],
+        vx: (Math.random() * 2 - 1) * 1.2,
+        vy: Math.random() * 0.8,
+        vz: (Math.random() * 2 - 1) * 1.2,
+        life: 0.3 + Math.random() * 0.4,
+        r: 0.72, g: 0.72, b: 0.76,
+        size: 2 + Math.random() * 3,
+      });
+    }
+    for (let i = 0; i < (hit ? 16 : 8); i++) {
+      this.particles.push({
+        x: to[0], y: to[1], z: to[2],
+        vx: (Math.random() * 2 - 1) * 3,
+        vy: Math.random() * 2.5,
+        vz: (Math.random() * 2 - 1) * 3,
+        life: 0.25 + Math.random() * 0.35,
+        r: hit ? 0.75 : 0.85, g: hit ? 0.12 : 0.8, b: hit ? 0.12 : 0.7,
+        size: 2 + Math.random() * 2.5,
+      });
+    }
+  }
+
+  private drawTracers(dt: number): void {
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      this.tracers[i].life -= dt;
+      if (this.tracers[i].life <= 0) this.tracers.splice(i, 1);
+    }
+    if (this.tracers.length === 0) return;
+    const gl = this.gl;
+    const n = Math.min(this.tracers.length, 128);
+    for (let i = 0; i < n; i++) {
+      const t = this.tracers[i];
+      this.tracerData.set(t.from, i * 6);
+      this.tracerData.set(t.to, i * 6 + 3);
+    }
+    gl.useProgram(this.lineProg);
+    gl.bindVertexArray(this.tracerVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.tracerVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, this.tracerData.subarray(0, n * 6), gl.STREAM_DRAW);
+    gl.uniformMatrix4fv(this.lineU.uMVP, false, this.viewProj);
+    gl.uniform4f(this.lineU.uColor, 1, 0.92, 0.6, 0.85);
+    gl.enable(gl.BLEND);
+    // Over the world rather than through it: a tracer you cannot see because a hill
+    // is in the way is a tracer that tells you nothing about where the shot came from.
+    gl.disable(gl.DEPTH_TEST);
+    gl.drawArrays(gl.LINES, 0, n * 2);
+    gl.enable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
+  }
+
   private stepParticles(dt: number): void {
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
@@ -875,9 +976,11 @@ export class Renderer {
     this.drawSky(v, sky, ex, ey, ez);
     this.drawChunks(v, sky, ex, ey, ez, false);
     this.drawPlayers(v, sky);
+    this.drawMobs(v, sky);
     if (v.target) this.drawTarget(v);
     this.drawParticles();
     this.drawChunks(v, sky, ex, ey, ez, true);
+    this.drawTracers(dt);
     this.drawHand(v, sky, aspect);
     this.placeTags(v);
   }
@@ -1008,6 +1111,53 @@ export class Renderer {
        */
       for (const side of [0.12, -0.12]) {
         this.part(p, 1.3, side, 0.04, 0.1, 0.12, EYE, p.pitch, +0.3, 0.26);
+      }
+    }
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * Everything alive that is not a person.
+   *
+   * Built from the same cube and the same `part` the players use: a cow is a body, a
+   * head on the front of it and four legs under it, and what separates a cow from a
+   * chicken is six numbers.
+   */
+  private drawMobs(v: View, sky: SkyColors): void {
+    const gl = this.gl;
+    gl.useProgram(this.entityProg);
+    gl.uniform1f(this.entityU.uUseTex, 0);
+    gl.uniform1f(this.entityU.uFogged, 1);
+    gl.bindVertexArray(this.cubeVao);
+
+    for (const m of v.mobs) {
+      const stats = mobStats(m.kind);
+      const dist = Math.hypot(m.x - v.x, m.y - v.y, m.z - v.z);
+      if (dist > 120) continue;
+      gl.uniform1f(this.entityU.uLight, this.lightAt(m.x, m.y + 0.9, m.z, sky));
+      // Legs swing off distance travelled, same as a player, so everything in the
+      // world walks in step with its own feet without a clock being on the wire.
+      const phase = (m.x + m.z) * 2.2;
+      const moving = m.state !== 0;
+      const swing = moving ? Math.sin(phase) * (m.state === FLEE ? 1.0 : 0.55) : 0;
+      const body = { x: m.x, y: m.y, z: m.z, yaw: m.yaw } as Player;
+
+      // Four-legged: a body, a head on the front of it, and four legs under it.
+      const [hide, snout, tall, long, wide, legLen] =
+        m.kind === PIG ? [hsl(340, 0.4, 0.66), hsl(340, 0.3, 0.55), 0.55, 0.9, 0.55, 0.32]
+        : m.kind === COW ? [hsl(28, 0.28, 0.32), hsl(28, 0.2, 0.72), 0.7, 1.1, 0.65, 0.5]
+        : [hsl(50, 0.1, 0.9), hsl(35, 0.85, 0.55), 0.36, 0.42, 0.34, 0.28];
+      const bodyY = legLen + tall / 2;
+      this.part(body, bodyY, 0, long, tall, wide, hide as [number, number, number], 0, 0);
+      this.part(body, bodyY + tall * 0.15, 0, tall * 0.8, tall * 0.85, wide * 0.8,
+        hide as [number, number, number], 0, 0, long / 2 + tall * 0.3);
+      this.part(body, bodyY + tall * 0.15, 0, 0.12, tall * 0.3, wide * 0.35,
+        snout as [number, number, number], 0, 0, long / 2 + tall * 0.75);
+      for (const fz of [wide * 0.32, -wide * 0.32]) {
+        for (const fx of [long * 0.32, -long * 0.32]) {
+          this.part(body, legLen, fz, 0.16, legLen, 0.16, hide as [number, number, number],
+            fx > 0 ? swing : -swing, -legLen / 2, fx);
+        }
       }
     }
     gl.bindVertexArray(null);
@@ -1168,6 +1318,11 @@ export class Renderer {
   private drawHand(v: View, sky: SkyColors, aspect: number): void {
     if (v.held === AIR) return;
     const gl = this.gl;
+    const thing = thingDef(v.held);
+    // A block is held as a cube and an ITEM is held as a flat card, because an item
+    // is a flat picture and a pickaxe drawn as a cube is a grey box with a pickaxe
+    // printed on every side of it.
+    const flat = !isBlock(v.held) || blockDef(v.held).shape === 'cross';
     const def = blockDef(v.held);
     gl.clear(gl.DEPTH_BUFFER_BIT);
 
@@ -1179,10 +1334,13 @@ export class Renderer {
     const bobY = Math.abs(Math.cos(v.walking)) * -0.018;
     const punch = Math.sin(Math.min(1, v.breaking * 8) * Math.PI) * 0.14;
     fromTranslation(m, 0.46 + bobX, -0.44 + bobY - punch * 0.4, -0.72 - punch * 0.2);
-    rotateY(m, m, -0.62);
+    rotateY(m, m, flat ? -0.35 : -0.62);
     rotateX(m, m, 0.18 + punch);
-    rotateZ(m, m, 0.1);
-    scale(m, m, 0.34, 0.34, 0.34);
+    rotateZ(m, m, flat ? 0.55 : 0.1);
+    // Paper-thin one way, so the card catches the light on its face and reads as a
+    // held object rather than as a sticker on the screen.
+    if (flat) scale(m, m, 0.03, 0.42, 0.42);
+    else scale(m, m, 0.34, 0.34, 0.34);
     multiply(this.mvp, this.tmp, m);
 
     gl.useProgram(this.entityProg);
@@ -1191,7 +1349,8 @@ export class Renderer {
     gl.uniform1i(this.entityU.uTex, 0);
     gl.uniform1f(this.entityU.uUseTex, 1);
     gl.uniform1f(this.entityU.uFogged, 0);
-    gl.uniform3f(this.entityU.uLayers, def.tex[0], def.tex[1], def.tex[2]);
+    if (flat) gl.uniform3f(this.entityU.uLayers, thing.tex, thing.tex, thing.tex);
+    else gl.uniform3f(this.entityU.uLayers, def.tex[0], def.tex[1], def.tex[2]);
     gl.uniform4f(this.entityU.uColor, 1, 1, 1, 1);
     gl.uniform1f(this.entityU.uLight, this.lightAt(v.x, v.y + EYE_H, v.z, sky));
     gl.uniformMatrix4fv(this.entityU.uMVP, false, this.mvp);

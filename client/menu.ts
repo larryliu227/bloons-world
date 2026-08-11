@@ -39,7 +39,7 @@ export class Menu {
     card.className = 'menu-card';
 
     card.appendChild(text('h1', 'brand', 'BLOONS WORLD'));
-    card.appendChild(text('p', 'tagline', 'One island, made of blocks. Everybody is in it.'));
+    card.appendChild(text('p', 'tagline', 'One island. Start with nothing. Everybody is in it.'));
 
     this.nameBox = document.createElement('input');
     this.nameBox.className = 'menu-name';
@@ -72,10 +72,10 @@ export class Menu {
 
     const keys = document.createElement('div');
     keys.className = 'menu-keys';
+    keys.appendChild(text('p', 'menu-first', 'Punch a tree. 1 log → 4 planks → sticks → a pickaxe.'));
+    keys.appendChild(text('p', 'menu-first', 'Then stone, iron, diamond — and at the far end, guns.'));
     keys.appendChild(text('p', '', 'WASD to walk · SPACE to jump · SHIFT to run'));
-    keys.appendChild(text('p', '', 'HOLD LEFT to dig · RIGHT CLICK to build'));
-    keys.appendChild(text('p', '', '1–9 or the WHEEL to pick a block · E for everything you have'));
-    keys.appendChild(text('p', '', 'On a phone, press the left half to steer'));
+    keys.appendChild(text('p', '', 'HOLD LEFT to dig · RIGHT CLICK to build or eat · E for what you have'));
     keys.appendChild(text('p', '', '? for the rest of it, any time'));
     card.appendChild(keys);
 

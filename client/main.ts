@@ -23,14 +23,18 @@
  * thing people notice and remember.
  */
 
-import { AIR, blockDef } from '../shared/blocks.js';
+import { AIR, LADDER, blockDef, ladderFor, orientFor } from '../shared/blocks.js';
+import { NEAR_RADIUS, digSeconds, isBlock, itemDef, thingDef, toolNeeded } from '../shared/items.js';
 import {
   DAY_MS,
   EYE_H,
   INPUT_RATE,
+  MAX_HP,
+  MAX_HUNGER,
   INTERP_DELAY_MS,
   PLAYER_H,
   REACH,
+  blockNear,
   clampToWorld,
   generate,
   getBlock,
@@ -42,14 +46,18 @@ import {
 import type { Hit, Player } from '../shared/world.js';
 import * as worldModule from '../shared/world.js';
 import * as blockModule from '../shared/blocks.js';
+import * as itemModule from '../shared/items.js';
 import { buildAtlas } from './atlas.js';
 import { Hud } from './hud.js';
 import { Input } from './input.js';
 import { Menu } from './menu.js';
 import { Net } from './net.js';
 import { Renderer } from './render.js';
+import { Sound } from './sound.js';
+import * as mobModule from '../shared/mobs.js';
 
 const NAME_KEY = 'world.name';
+const TOKEN_KEY = 'world.token';
 
 const root = document.getElementById('app');
 if (!root) throw new Error('world: missing #app');
@@ -65,7 +73,8 @@ const renderer = new Renderer();
 root.appendChild(renderer.el);
 const input = new Input(renderer.el);
 const hud = new Hud(root, buildAtlas());
-const net = new Net(loadName());
+const net = new Net(loadName(), loadToken());
+const sound = new Sound();
 
 const menu = new Menu(loadName());
 root.appendChild(menu.el);
@@ -75,6 +84,8 @@ let entered = false;
 input.setEnabled(false);
 
 menu.onEnter = (chosen) => {
+  // The one gesture every browser insists on before it will let a page make a noise.
+  sound.arm();
   me.name = chosen;
   saveName(chosen);
   net.rename(chosen);
@@ -86,11 +97,16 @@ net.onStatus = (s, detail) => {
   menu.setStatus(s, detail);
 };
 net.onProgress = (f) => menu.setProgress(f);
-net.onInventory = (pairs) => hud.setInventory(pairs);
+net.onInventory = (slots, cursor) => hud.setInventory(slots, cursor);
 net.onEdit = (x, y, z, was, now) => {
   // Somebody else's dig, or the server confirming ours. Either way there is a block
   // less in the world and it should look like it went somewhere.
-  if (was !== AIR && now === AIR) renderer.burst(x, y, z, was);
+  if (was !== AIR && now === AIR) {
+    renderer.burst(x, y, z, was);
+    sound.play('break', [x + 0.5, y + 0.5, z + 0.5]);
+  } else if (now !== AIR) {
+    sound.play('place', [x + 0.5, y + 0.5, z + 0.5]);
+  }
 };
 net.onReady = () => {
   // Drain the world's dirty list into the renderer FIRST: `relightAll` marks every
@@ -100,6 +116,18 @@ net.onReady = () => {
   meshing = true;
 };
 hud.onCraft = (r) => net.sendCraft(r);
+// The one thing the recipe list cannot work out on its own: whether you are standing
+// beside a furnace.
+hud.nearby = (block) => blockNear(me.x, me.y, me.z, block, NEAR_RADIUS);
+hud.onSlotClick = (slot, right, shift) => net.sendSlotClick(slot, right, shift);
+hud.onClosePack = () => net.sendClosePack();
+net.onShot = (from, to, hit) => {
+  renderer.tracer(from, to, hit);
+  sound.play('shoot', from);
+};
+// Everything the server says happened somewhere. It decides what; the client decides
+// how loud, which is entirely a function of how far away you are standing.
+net.onNoise = (what, at) => sound.play(what, at, what === 'groan' ? 400 : 40);
 
 /** True while the whole world is being turned into triangles for the first time. */
 let meshing = false;
@@ -117,6 +145,12 @@ const me: Player = {
   moving: false,
   sprinting: false,
   hue: 0,
+  hp: MAX_HP,
+  cap: MAX_HP,
+  hunger: MAX_HUNGER,
+  respawn: 0,
+  fell: 0,
+  peakY: 0,
 };
 let seeded = false;
 
@@ -199,11 +233,17 @@ function loop(now: number): void {
   const wheel = input.takeSlotDelta();
   if (wheel !== 0) hud.selectSlot(hud.slot + wheel);
 
-  const m = panel ? { fwd: 0, strafe: 0 } : input.move();
+  // Flat on your back, nothing you press does anything — including here, not just on
+  // the server. Predicting a walk the server is going to refuse means two seconds of
+  // being dragged back to where you fell, which reads as a broken connection rather
+  // than as being knocked down. `step` enforces the same rule; this stops the input
+  // reaching the wire at all.
+  const flat = me.respawn > 0;
+  const m = panel || flat ? { fwd: 0, strafe: 0 } : input.move();
   me.yaw = input.yaw;
   me.pitch = input.pitch;
-  const wantJump = !panel && input.jump;
-  const wantSprint = !panel && input.sprint;
+  const wantJump = !panel && !flat && input.jump;
+  const wantSprint = !panel && !flat && input.sprint;
 
   if (seeded) {
     const before = { x: me.x, z: me.z };
@@ -217,14 +257,40 @@ function loop(now: number): void {
   // get to send seven times more input than a 20 Hz one.
   if (now - lastInputAt > 1000 / INPUT_RATE) {
     lastInputAt = now;
-    net.sendInput(m.fwd, m.strafe, input.yaw, input.pitch, input.takeJump() || wantJump, wantSprint);
+    net.sendInput(m.fwd, m.strafe, input.yaw, input.pitch, input.takeJump() || wantJump, wantSprint, hud.held());
   }
 
   const eyeY = me.y + EYE_H;
   const target = aimedBlock(eyeY);
-  if (!panel) {
+  if (!panel && !flat) {
+    /*
+     * A gun is not a tool, so the button that digs fires it instead. Nothing in the
+     * world can be dug with a musket, so there is no case where both would happen.
+     */
+    /*
+     * A gun is not a tool, so the button that digs fires it instead. Automatic ones
+     * read the button as HELD and the rest as a press — which is the whole difference
+     * between them, and it lives here rather than in the server because the server
+     * only ever hears "fire" and enforces the rate either way.
+     */
+    const gun = itemDef(hud.held())?.gun;
+    if (gun) {
+      const pulled = gun.auto ? input.digging : input.takeFire();
+      if (pulled) {
+        if (hud.countOf(gun.ammo) > 0) net.sendFire(input.yaw, input.pitch);
+        else hud.say(`out of ${thingDef(gun.ammo).name}`);
+      }
+    } else if (input.takeFire()) {
+      // No gun: the same button swings at whatever is in front of you. The server
+      // decides whether anything was there.
+      net.sendMelee(input.yaw, input.pitch);
+    }
     dig(target, dt);
-    if (input.takePlace()) place(target);
+    // Right-click is "use": eat what is in your hand if it is food, otherwise build.
+    if (input.takePlace()) {
+      if (itemDef(hud.held())?.food) net.sendEat(hud.held());
+      else place(target);
+    }
     if (input.takePick() && target) hud.pick(getBlock(target.x, target.y, target.z));
   } else {
     digProgress = 0;
@@ -251,6 +317,7 @@ function loop(now: number): void {
       pitch: input.pitch,
       day: dayAt,
       players: everyone(),
+      mobs: net.last?.mobs ?? [],
       meId: net.id,
       target,
       breaking: digTime(target) > 0 ? digProgress / digTime(target) : 0,
@@ -262,7 +329,16 @@ function loop(now: number): void {
     dt,
   );
 
+  /*
+   * Footsteps, and the two sounds that come from your own body rather than from the
+   * world: they are played here because the server has no idea you took a step.
+   */
+  sound.listener(me.x, eyeY, me.z, input.yaw, input.pitch);
+  if (me.moving && me.onGround) sound.play('step', undefined, me.sprinting ? 260 : 380);
   hud.tick();
+  hud.setHealth(me.hp, me.cap);
+  hud.setHunger(me.hunger);
+  hud.setDead(me.respawn);
   hud.setHeadcount(net.last?.players.length ?? 1);
   hud.setUnderwater(underwater);
   hud.setDebug(
@@ -316,6 +392,21 @@ function reconcile(dt: number): void {
   if (Math.abs(ey) > 0.9) me.y += ey * catchUp;
   me.hue = server.hue;
   me.id = server.id;
+  /*
+   * Health and the knockdown are the SERVER'S alone and are taken outright rather
+   * than eased. None of it is predicted: being briefly wrong about a pixel is
+   * invisible, being briefly wrong about whether that drop hurt is not, and a bar
+   * that flickered down and back on every mispredicted landing would be worse than
+   * one that answers a round trip late.
+   */
+  if (server.hp < me.hp - 0.01) {
+    hud.flashDamage();
+    sound.play(server.hp <= 0 ? 'die' : 'hurt');
+  }
+  me.hp = server.hp;
+  me.cap = server.cap;
+  me.hunger = server.hunger;
+  me.respawn = server.respawn;
 }
 
 /**
@@ -383,11 +474,17 @@ function aimedBlock(eyeY: number): Hit | null {
   );
 }
 
-/** How long this block takes to dig, or 0 if it cannot be dug at all. */
+/**
+ * How long this block takes with what is in your hand, or 0 if it cannot be done.
+ *
+ * The same `digSeconds` the server checks, so the client never starts a timer for
+ * something the server is going to refuse — the player is told they need an axe
+ * instead of watching a progress bar fill and then nothing happen.
+ */
 function digTime(target: Hit | null): number {
   if (!target) return 0;
-  const def = blockDef(getBlock(target.x, target.y, target.z));
-  return Number.isFinite(def.hardness) ? Math.max(0.05, def.hardness) : 0;
+  const seconds = digSeconds(getBlock(target.x, target.y, target.z), hud.held());
+  return seconds === null ? 0 : Math.max(0.05, seconds);
 }
 
 function dig(target: Hit | null, dt: number): void {
@@ -404,8 +501,18 @@ function dig(target: Hit | null, dt: number): void {
     digProgress = 0;
   }
   const need = digTime(target);
-  if (need === 0) return;
+  if (need === 0) {
+    // Say WHY nothing is happening. A tool gate you cannot see is indistinguishable
+    // from a broken game, and this is the single most confusing moment in the whole
+    // progression: your hands do nothing to a tree and there is no other feedback.
+    const wanted = toolNeeded(getBlock(target.x, target.y, target.z));
+    if (wanted) hud.say(`you need ${wanted} for that`);
+    return;
+  }
   digProgress += dt;
+  // A scrape every couple of hundred milliseconds while the cracks spread, so digging
+  // has a rhythm rather than being silent until it suddenly is not.
+  sound.play('dig', [target.x + 0.5, target.y + 0.5, target.z + 0.5], 210);
   if (digProgress < need) return;
 
   const was = getBlock(target.x, target.y, target.z);
@@ -420,6 +527,8 @@ function dig(target: Hit | null, dt: number): void {
 function place(target: Hit | null): void {
   const block = hud.held();
   if (!target || block === AIR) return;
+  // Items are not scenery. A stone axe does not go in the wall.
+  if (!isBlock(block)) return;
   if (hud.countOf(block) <= 0) return;
   // No face means the ray started inside a block, which is no direction to build in.
   if (target.nx === 0 && target.ny === 0 && target.nz === 0) return;
@@ -435,8 +544,20 @@ function place(target: Hit | null): void {
    * back a moment later, and leaving you standing in a hole you did not dig.
    */
   if (overlapsMe(x, y, z)) return;
-  setBlock(x, y, z, block);
-  net.sendEdit(x, y, z, block);
+  // Predicted with the same rules the server will apply, so a staircase does not
+  // visibly flip round a moment after you put it down — and a ladder that has no
+  // wall to hang on is never predicted at all rather than appearing and vanishing.
+  let placed = orientFor(block, input.yaw);
+  if (block === LADDER) {
+    const nailed = ladderFor(target.nx, target.ny, target.nz);
+    if (nailed === null) {
+      hud.say('a ladder needs a wall to hang on');
+      return;
+    }
+    placed = nailed;
+  }
+  setBlock(x, y, z, placed);
+  net.sendEdit(x, y, z, block, [target.nx, target.ny, target.nz]);
 }
 
 function overlapsMe(bx: number, by: number, bz: number): boolean {
@@ -496,6 +617,33 @@ function saveName(n: string): void {
   }
 }
 
+/**
+ * Who this browser is, across sessions.
+ *
+ * A long random string made once and kept forever, sent with `hello`. It is what the
+ * server files your pockets, your health and where you were standing under, so
+ * closing the tab is a pause rather than a wipe. In a browser that refuses local
+ * storage it comes out fresh every time, which costs you your things and nothing
+ * else — so it degrades to exactly the old behaviour instead of failing.
+ */
+function loadToken(): string {
+  try {
+    const stored = localStorage.getItem(TOKEN_KEY);
+    if (stored && stored.length >= 8) return stored;
+  } catch {
+    /* private mode */
+  }
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const fresh = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  try {
+    localStorage.setItem(TOKEN_KEY, fresh);
+  } catch {
+    /* private mode — every visit is a new person, which is the old behaviour */
+  }
+  return fresh;
+}
+
 window.addEventListener('resize', () => renderer.resize());
 window.addEventListener('orientationchange', () => setTimeout(() => renderer.resize(), 120));
 // Losing the cursor is how you leave the game for a moment; the panels should not
@@ -530,6 +678,10 @@ requestAnimationFrame(function first(now: number) {
   blocks: worldModule,
   /** What each block id means: `world.kinds.BLOCKS[3].name`. */
   kinds: blockModule,
+  /** Items, tools, drops and recipes: `world.things.thingDef(id).name`. */
+  things: itemModule,
+  /** Creatures: `world.mobs.variantOf(m.variant).name`. */
+  mobs: mobModule,
   /** What the crosshair is on, right now. */
   aim: () => aimedBlock(me.y + EYE_H),
 };

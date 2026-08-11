@@ -17,7 +17,7 @@
  * tells the vertex shader everything it needs to work out where in the image you are.
  */
 
-import { AIR, BLOCKS, WATER, faceVisible } from '../shared/blocks.js';
+import { AIR, BLOCKS, WALL_DIRS, WATER, boxesOf, faceVisible } from '../shared/blocks.js';
 import { CHUNK, WORLD_X, WORLD_Y, WORLD_Z, blockArray, lightArray } from '../shared/world.js';
 
 /** Bytes per vertex, and vertices per quad. */
@@ -152,6 +152,26 @@ export function buildChunk(cx: number, cy: number, cz: number): ChunkMesh {
           continue;
         }
 
+        /*
+         * Slabs and stairs are drawn as their COLLISION BOXES, which is the only way
+         * the thing you can see and the thing you bump into stay the same shape. Every
+         * face of every box is built — no culling against the neighbours — because a
+         * half-height face against a full block leaves a real gap that has to be
+         * filled, and working out which parts of which faces are covered costs more
+         * than the handful of quads it would save.
+         */
+        if (def.shape === 'ladder') {
+          ladder(solid, lx, ly, lz, def.tex[0], def.facing, lit(bx, by, bz));
+          continue;
+        }
+
+        if (def.shape === 'slab' || def.shape === 'stair') {
+          for (const box of boxesOf(self)) {
+            cuboid(solid, lx, ly, lz, box, def.tex, lit(bx, by, bz), bx, by, bz, at, lit);
+          }
+          continue;
+        }
+
         const target = def.liquid ? liquid : solid;
         /*
          * Water sits a notch below the top of its cell unless there is more water
@@ -266,6 +286,93 @@ export function buildChunk(cx: number, cy: number, cz: number): ChunkMesh {
     water: liquid.take(),
     waterQuads: liquid.quads,
   };
+}
+
+/**
+ * One box of a block that is not a whole block: a slab, or half a staircase.
+ *
+ * Lit from the cell OUTSIDE each face rather than from the block's own cell, the same
+ * way a full cube is, so a slab set into a wall is shaded like the wall around it
+ * rather than glowing at one flat brightness.
+ */
+function cuboid(
+  b: Builder,
+  lx: number, ly: number, lz: number,
+  box: [number, number, number, number, number, number],
+  tex: [number, number, number],
+  own: number,
+  bx: number, by: number, bz: number,
+  at: (x: number, y: number, z: number) => number,
+  lit: (x: number, y: number, z: number) => number,
+): void {
+  const [ax, ay, az, cx, cy, cz] = box;
+  for (let f = 0; f < 6; f++) {
+    const face = FACES[f];
+    // Only ask the neighbour about light if this face is actually on the block's
+    // boundary; an internal face of a stair step is lit by the cell it faces into.
+    const flush =
+      (f === 0 && cx >= 1) || (f === 1 && ax <= 0) ||
+      (f === 2 && cy >= 1) || (f === 3 && ay <= 0) ||
+      (f === 4 && cz >= 1) || (f === 5 && az <= 0);
+    const nx = bx + face.n[0];
+    const ny = by + face.n[1];
+    const nz = bz + face.n[2];
+    if (flush && BLOCKS[at(nx, ny, nz)].opaque) continue;
+    const light = flush ? lit(nx, ny, nz) : own;
+    const sky = light >> 4;
+    const blk = light & 15;
+    const layer = tex[FACE_TEX[f]];
+    for (let c = 0; c < 4; c++) {
+      const [du, dv] = CORNERS[c];
+      // The corner of the BOX, not of the cell: pick the low or high end of each axis
+      // according to which way this face and this corner point.
+      const pick = (axis: number, lo: number, hi: number): number => {
+        const n = face.n[axis];
+        const u = face.u[axis];
+        const v = face.v[axis];
+        if (n !== 0) return n > 0 ? hi : lo;
+        if (u !== 0) return u * du > 0 ? hi : lo;
+        if (v !== 0) return v * dv > 0 ? hi : lo;
+        return lo;
+      };
+      b.vertex(
+        lx + pick(0, ax, cx),
+        ly + pick(1, ay, cy),
+        lz + pick(2, az, cz),
+        pack(layer, c, f, sky, blk, 3),
+      );
+    }
+  }
+}
+
+/**
+ * A ladder: one flat panel against the wall it is nailed to, drawn from both sides.
+ *
+ * Both sides because you climb THROUGH the cell — you are standing inside it for the
+ * whole ascent — and a ladder that vanished the moment your eyes passed the plane of
+ * it would leave you climbing an invisible one.
+ */
+function ladder(b: Builder, lx: number, ly: number, lz: number, layer: number, facing: number, light: number): void {
+  const sky = light >> 4;
+  const blk = light & 15;
+  const [wx, , wz] = WALL_DIRS[facing];
+  // A sixteenth of a block off the wall, which is the thickness of a real one and
+  // is also just enough to stop it fighting the wall for the same depth value.
+  const d = 1 / 16;
+  const at = (t: number, u: number): [number, number, number] => {
+    // `t` runs across the panel and `u` up it; which world axis "across" is depends
+    // on which wall this is.
+    const off = wx !== 0 ? d + (wx > 0 ? 1 - 2 * d : 0) : 0;
+    if (wx !== 0) return [lx + (wx > 0 ? 1 - d : d), ly + u, lz + t];
+    void off;
+    return [lx + t, ly + u, lz + (wz > 0 ? 1 - d : d)];
+  };
+  for (const back of [false, true]) {
+    const corners: [number, number, number][] = back
+      ? [at(1, 0), at(0, 0), at(0, 1), at(1, 1)]
+      : [at(0, 0), at(1, 0), at(1, 1), at(0, 1)];
+    corners.forEach(([x, y, z], c) => b.vertex(x, y, z, pack(layer, c, 4, sky, blk, 3)));
+  }
 }
 
 /**

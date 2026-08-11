@@ -18,6 +18,7 @@
 import { PROTOCOL_VERSION, decode, encode } from '../shared/protocol.js';
 import type { ClientMsg, ServerMsg } from '../shared/protocol.js';
 import type { Player } from '../shared/world.js';
+import type { Mob } from '../shared/mobs.js';
 import { getBlock, markAllDirty, relightAll, resetToPristine, setBlock, setBlockRaw, unpackIndex } from '../shared/world.js';
 
 /** One snapshot, stamped on arrival so other players can be interpolated. */
@@ -26,6 +27,7 @@ export interface Frame {
   tick: number;
   day: number;
   players: Player[];
+  mobs: Mob[];
 }
 
 export type Status = 'offline' | 'connecting' | 'loading' | 'online';
@@ -45,19 +47,27 @@ export class Net {
   /** Fired for every block anybody changes, so the client can spray particles. */
   onEdit: ((x: number, y: number, z: number, was: number, now: number) => void) | null = null;
   /** Fired when the server restates what is in your pockets. */
-  onInventory: ((pairs: number[]) => void) | null = null;
+  onInventory: ((slots: number[], cursor: number[]) => void) | null = null;
+  /** Fired for anything the server says made a noise somewhere. */
+  onNoise: ((what: string, at: [number, number, number]) => void) | null = null;
+  /** Fired when anybody shoots, so every screen draws the tracer. */
+  onShot:
+    | ((from: [number, number, number], to: [number, number, number], hit: boolean) => void)
+    | null = null;
   /** 0..1 while the world is arriving. */
   onProgress: ((fraction: number) => void) | null = null;
 
   private ws: WebSocket | null = null;
   private retry = 0;
   private name: string;
+  private token: string;
   private expectedEdits = 0;
   private receivedEdits = 0;
   private syncing = false;
 
-  constructor(name: string) {
+  constructor(name: string, token: string) {
     this.name = name;
+    this.token = token;
   }
 
   connect(): void {
@@ -74,7 +84,8 @@ export class Net {
     }
     this.ws = socket;
 
-    socket.onopen = () => socket.send(encode({ t: 'hello', name: this.name, version: PROTOCOL_VERSION }));
+    socket.onopen = () =>
+      socket.send(encode({ t: 'hello', name: this.name, version: PROTOCOL_VERSION, token: this.token }));
     socket.onmessage = (e) => {
       if (typeof e.data !== 'string') return;
       const msg = decode<ServerMsg>(e.data);
@@ -146,12 +157,20 @@ export class Net {
         // building. There are only a few of them and the next one is 50ms away.
         if (this.syncing) return;
         this.prev = this.last;
-        this.last = { at: performance.now(), tick: msg.tick, day: msg.day, players: msg.players };
+        this.last = { at: performance.now(), tick: msg.tick, day: msg.day, players: msg.players, mobs: msg.mobs ?? [] };
         return;
 
       case 'inv':
         this.inventory = msg.d;
-        this.onInventory?.(msg.d);
+        this.onInventory?.(msg.d, msg.cur ?? []);
+        return;
+
+      case 'shot':
+        this.onShot?.([msg.x, msg.y, msg.z], [msg.hx, msg.hy, msg.hz], msg.hit);
+        return;
+
+      case 'noise':
+        this.onNoise?.(msg.what, [msg.x, msg.y, msg.z]);
         return;
 
       case 'error':
@@ -164,17 +183,50 @@ export class Net {
   }
 
   /** Post the current intent. Dropped rather than queued — a stale input is worse. */
-  sendInput(fwd: number, strafe: number, yaw: number, pitch: number, jump: boolean, sprint: boolean): void {
-    this.send({ t: 'input', f: fwd, s: strafe, yaw, pitch, jump, sprint });
+  sendInput(
+    fwd: number,
+    strafe: number,
+    yaw: number,
+    pitch: number,
+    jump: boolean,
+    sprint: boolean,
+    held: number,
+  ): void {
+    this.send({ t: 'input', f: fwd, s: strafe, yaw, pitch, jump, sprint, held });
   }
 
   /** Ask for a block to change. The server decides whether it does. */
-  sendEdit(x: number, y: number, z: number, b: number): void {
-    this.send({ t: 'edit', x, y, z, b });
+  sendEdit(x: number, y: number, z: number, b: number, n: [number, number, number] = [0, 0, 0]): void {
+    this.send({ t: 'edit', x, y, z, b, nx: n[0], ny: n[1], nz: n[2] });
   }
 
   sendCraft(recipe: number): void {
     this.send({ t: 'craft', r: recipe });
+  }
+
+  /** Eat what is in the selected slot. The server decides whether there was room. */
+  sendEat(thing: number): void {
+    this.send({ t: 'eat', b: thing });
+  }
+
+  /** Pull the trigger. All the client sends is where the barrel was pointing. */
+  sendFire(yaw: number, pitch: number): void {
+    this.send({ t: 'fire', yaw, pitch });
+  }
+
+  /** Swing at whatever is in front of you. */
+  sendMelee(yaw: number, pitch: number): void {
+    this.send({ t: 'melee', yaw, pitch });
+  }
+
+  /** A click in the inventory window. The server decides what it did. */
+  sendSlotClick(slot: number, right: boolean, shift: boolean): void {
+    this.send({ t: 'click', slot, right, shift });
+  }
+
+  /** The window closed: tip the grid and the cursor back into the pockets. */
+  sendClosePack(): void {
+    this.send({ t: 'closepack' });
   }
 
   rename(name: string): void {

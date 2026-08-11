@@ -20,7 +20,13 @@
   --pad-l: max(8px, env(safe-area-inset-left));
   --pad-r: max(8px, env(safe-area-inset-right));
 }
-* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+  /* No "copy / look up" bubble when somebody holds DIG, and no blue selection when a
+   * drag across the world happens to start on a label. */
+  -webkit-touch-callout: none;
+}
 html, body {
   margin: 0;
   height: 100%;
@@ -97,11 +103,159 @@ html, body {
   white-space: nowrap;
 }
 .headcount { top: var(--pad-t); left: var(--pad-l); }
-.debug { top: calc(var(--pad-t) + 26px); left: var(--pad-l); color: rgba(230, 240, 248, 0.5); font-size: 11px; }
+.debug { top: calc(var(--pad-t) + 74px); left: var(--pad-l); color: rgba(230, 240, 248, 0.5); font-size: 11px; }
 .status { top: var(--pad-t); right: calc(var(--pad-r) + 40px); }
 .status[data-state="online"] { color: var(--green); }
 .status[data-state="connecting"], .status[data-state="loading"] { color: var(--gold); }
 .status[data-state="offline"] { color: #ff7b72; }
+
+/* ------------------------------------------------------------------ health
+ *
+ * Ten hearts rather than a bar. A continuous bar loses its last tenth to rounding at
+ * this size, and "how much have I got left" is a counting question. The half state is
+ * a hard-edged gradient, because the smallest thing that can hurt you costs one.
+ */
+.hearts {
+  position: fixed;
+  top: calc(var(--pad-t) + 26px);
+  left: var(--pad-l);
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px;
+  background: var(--panel);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.hearts i {
+  width: 11px;
+  height: 10px;
+  background: rgba(230, 240, 248, 0.13);
+  /* A pixel heart, cut out of a rectangle. Nine steps, so it stays crisp at any
+   * zoom and matches the rest of the art without needing an image. */
+  clip-path: polygon(
+    18% 0%, 45% 0%, 45% 18%, 55% 18%, 55% 0%, 82% 0%, 100% 18%, 100% 45%,
+    82% 64%, 64% 82%, 50% 100%, 36% 82%, 18% 64%, 0% 45%, 0% 18%
+  );
+  transition: background 150ms linear;
+}
+.hearts i.on { background: #ff4d4d; }
+.hearts i.half { background: linear-gradient(90deg, #ff4d4d 50%, rgba(230, 240, 248, 0.13) 50%); }
+/* A gap where one section ends and the next begins, so the ceilings are visible
+ * without anybody having to have read about them. */
+.hearts i.divide { margin-left: 7px; }
+/*
+ * A heart above your section's ceiling. Drawn hollow rather than empty, because they
+ * are different facts: an empty heart is one you will get back, and a barred one is
+ * one you will not until you die. A player who cannot tell them apart sits still
+ * waiting for something that is never coming.
+ */
+.hearts i.lost { background: rgba(255, 77, 77, 0.13); box-shadow: none; }
+.hearts i.lost::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(45deg, transparent 0 2px, rgba(120, 30, 30, 0.55) 2px 3px);
+}
+.hearts i { position: relative; }
+
+/* Hunger, read exactly like the hearts so there is nothing new to learn. */
+.hunger {
+  position: fixed;
+  top: calc(var(--pad-t) + 48px);
+  left: var(--pad-l);
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px;
+  background: var(--panel);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.hunger i {
+  width: 10px;
+  height: 10px;
+  background: rgba(230, 240, 248, 0.13);
+  /* A drumstick, roughly: a round end and a bone. */
+  clip-path: polygon(30% 0%, 70% 0%, 92% 22%, 92% 52%, 62% 78%, 62% 100%, 34% 100%, 34% 78%, 8% 52%, 8% 22%);
+  transition: background 150ms linear;
+}
+.hunger i.on { background: #d99a4e; }
+.hunger i.half { background: linear-gradient(90deg, #d99a4e 50%, rgba(230, 240, 248, 0.13) 50%); }
+.hunger.low i.on, .hunger.low i.half { animation: heartbeat 900ms ease-in-out infinite; }
+
+/*
+ * The death screen. Ten seconds is long enough that it has to say what is happening
+ * and what it cost, and short enough that it must not be a menu.
+ */
+.dead {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 6px;
+  text-align: center;
+  background: rgba(60, 6, 6, 0.55);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+.dead[hidden] { display: none; }
+.dead h2 {
+  margin: 0;
+  font-size: clamp(22px, 7vw, 38px);
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: #ff6b6b;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+}
+.dead-lost { margin: 0; font-size: 13px; letter-spacing: 0.08em; color: rgba(255, 210, 210, 0.85); }
+.dead-count { margin: 10px 0 0; font-size: 26px; letter-spacing: 0.1em; color: #fff; }
+.dead-note { margin: 0; font-size: 11px; letter-spacing: 0.08em; color: rgba(255, 210, 210, 0.5); }
+
+/*
+ * One line for the things the game has to TELL you rather than show you — which is
+ * almost entirely "you need an axe for that". A tool gate you cannot see is
+ * indistinguishable from a broken game.
+ */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--pad-b) + 92px);
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  background: rgba(10, 14, 20, 0.85);
+  border: 1px solid rgba(255, 210, 61, 0.4);
+  border-radius: 3px;
+  color: var(--gold);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+.toast[hidden] { display: none; }
+.toast.go { opacity: 1; }
+.hearts.low i.on, .hearts.low i.half { animation: heartbeat 760ms ease-in-out infinite; }
+@keyframes heartbeat { 50% { filter: brightness(1.7); } }
+@media (prefers-reduced-motion: reduce) {
+  .hearts.low i.on, .hearts.low i.half { animation: none; }
+}
+
+/* A wash across the whole screen when something hurts, because you are looking at
+ * the ground coming up at you and not at the corner of the screen. */
+.hurt-flash {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(ellipse at center, rgba(190, 20, 20, 0) 35%, rgba(190, 20, 20, 0.55) 100%);
+}
+.hurt-flash.go { animation: hurt 420ms ease-out; }
+@keyframes hurt { 0% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .hurt-flash.go { animation: hurt 420ms steps(2, end); }
+}
 
 /* Under the surface. A wash rather than a filter, so it costs nothing. */
 .wet {
@@ -112,6 +266,98 @@ html, body {
   box-shadow: inset 0 0 140px rgba(4, 26, 54, 0.75);
 }
 .wet[hidden] { display: none; }
+
+/* --------------------------------------------------------------- inventory
+ *
+ * A slot is a slot is a slot: the crafting grid, the pockets and the hotbar are all
+ * the same cell, and so is the stack on the cursor. One rule, one look, and picking
+ * something up from one place and putting it in another needs no special case.
+ */
+.panel-card.pack { width: min(520px, 100%); }
+.pslot {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border: 2px solid rgba(230, 240, 248, 0.14);
+  border-radius: 2px;
+  background: rgba(230, 240, 248, 0.05);
+  cursor: pointer;
+}
+.pslot:hover { background: rgba(230, 240, 248, 0.18); border-color: rgba(230, 240, 248, 0.4); }
+.pslot i {
+  position: absolute;
+  inset: 3px;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+.pslot b {
+  position: absolute;
+  right: 2px;
+  bottom: 0;
+  font-size: 11px;
+  font-weight: 700;
+  pointer-events: none;
+  text-shadow: 0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000;
+}
+.pslot.output {
+  width: 54px;
+  height: 54px;
+  border-color: rgba(255, 210, 61, 0.45);
+  background: rgba(255, 210, 61, 0.07);
+}
+.pslot.output.filled { border-color: var(--gold); background: rgba(255, 210, 61, 0.18); }
+
+.bench { display: flex; align-items: center; gap: 14px; margin: 14px 0 4px; }
+.craft-grid { display: grid; grid-template-columns: repeat(3, 44px); gap: 3px; }
+.craft-arrow { font-size: 22px; color: rgba(230, 240, 248, 0.4); }
+
+.slot-grid { display: grid; grid-template-columns: repeat(9, 44px); gap: 3px; margin-top: 6px; }
+/* The hotbar row, pushed down a little so it reads as the thing you are holding
+ * rather than as a fourth row of pockets. It is the same nine slots either way. */
+.slot-grid.belt { margin-top: 4px; }
+.slot-grid.belt .pslot {
+  border-color: rgba(255, 210, 61, 0.45);
+  background: rgba(255, 210, 61, 0.05);
+}
+.belt-head { color: var(--gold) !important; opacity: 0.8; }
+
+/* The stack the mouse is carrying. Outside the card, so it can be over anything. */
+.cursor-stack {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 36px;
+  height: 36px;
+  z-index: 40;
+  pointer-events: none;
+}
+.cursor-stack[hidden] { display: none; }
+.cursor-stack i {
+  position: absolute;
+  inset: 0;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  image-rendering: pixelated;
+}
+.cursor-stack b {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-shadow: 0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000;
+}
+
+@media (max-width: 560px) {
+  .craft-grid { grid-template-columns: repeat(3, 36px); }
+  .slot-grid { grid-template-columns: repeat(9, 36px); }
+  .pslot { width: 36px; height: 36px; }
+  .pslot.output { width: 44px; height: 44px; }
+}
 
 /* ------------------------------------------------------------------ hotbar */
 
@@ -230,6 +476,44 @@ html, body {
   .jump-btn, .dig-btn, .place-btn { display: none; }
 }
 
+/*
+ * A tablet is not a big phone.
+ *
+ * There is plenty of room, the thumbs are further apart, and the hand is holding the
+ * whole thing rather than balancing it — so everything gets bigger and moves inward
+ * from the corners, where a thumb cannot comfortably reach on a ten-inch screen.
+ */
+@media (hover: none) and (min-width: 760px) {
+  .jump-btn { width: 92px; height: 92px; font-size: 13px; right: calc(var(--pad-r) + 26px); bottom: calc(var(--pad-b) + 110px); }
+  .dig-btn { width: 86px; height: 86px; font-size: 13px; right: calc(var(--pad-r) + 132px); bottom: calc(var(--pad-b) + 106px); }
+  .place-btn { width: 78px; height: 78px; font-size: 12px; right: calc(var(--pad-r) + 44px); bottom: calc(var(--pad-b) + 214px); }
+  .help-btn { width: 44px; height: 44px; font-size: 19px; }
+  /* The status pill has to clear the bigger help button, or it sits on top of it. */
+  .status { right: calc(var(--pad-r) + 56px); }
+  /* Big enough to actually read the shape at arm's length. */
+  .pattern { grid-template-columns: repeat(3, 6px); grid-template-rows: repeat(3, 6px); }
+  .pattern.loose { width: 20px; }
+  .slot { width: 58px; height: 58px; }
+  .slot b { font-size: 13px; }
+  .hotbar { bottom: calc(var(--pad-b) + 10px); }
+  .held-name { bottom: calc(var(--pad-b) + 80px); font-size: 14px; }
+  .hearts i { width: 15px; height: 14px; }
+  .hunger i { width: 14px; height: 14px; }
+  .headcount, .status { font-size: 14px; padding: 6px 11px; }
+  .debug { font-size: 12px; }
+  .stick { width: 132px; height: 132px; margin: -66px 0 0 -66px; }
+  .stick-nub { width: 48px; height: 48px; margin: -24px 0 0 -24px; }
+  /* Slots big enough to hit reliably, and a card that uses the width a tablet has. */
+  .panel-card.pack { width: min(660px, 100%); }
+  .pslot { width: 58px; height: 58px; }
+  .pslot.output { width: 68px; height: 68px; }
+  .craft-grid { grid-template-columns: repeat(3, 58px); }
+  .slot-grid { grid-template-columns: repeat(9, 58px); gap: 4px; }
+  .cursor-stack { width: 46px; height: 46px; }
+  .recipe { font-size: 13px; padding: 10px 12px; }
+  .panel dl { font-size: 13px; }
+}
+
 .help-btn {
   top: var(--pad-t);
   right: var(--pad-r);
@@ -252,6 +536,18 @@ html, body {
   pointer-events: none;
 }
 .stick.hidden { display: none; }
+/*
+ * A second ring, just inside the edge, marking where pushing harder becomes running.
+ * Without it the sprint threshold is a secret; with it, it is a thing you can see
+ * yourself cross.
+ */
+.stick::after {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border: 1px dashed rgba(255, 210, 61, 0.35);
+  border-radius: 50%;
+}
 .stick-nub {
   position: absolute;
   left: 50%;
@@ -295,6 +591,23 @@ html, body {
   letter-spacing: 0.18em;
   color: var(--green);
 }
+.quick-btn {
+  margin-left: auto;
+  padding: 6px 11px;
+  background: rgba(230, 240, 248, 0.08);
+  color: rgba(230, 240, 248, 0.7);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+.quick-btn.on { background: var(--gold); border-color: var(--gold); color: #0a0e14; }
+/* On a mouse it is only ever a convenience — shift already does this — so it says so
+ * quietly rather than taking up room somebody with a keyboard does not need. */
+@media (hover: hover) and (pointer: fine) { .quick-btn { opacity: 0.5; font-size: 9px; } }
+
 .panel-close {
   width: 30px;
   height: 30px;
@@ -349,9 +662,13 @@ html, body {
 .nothing { margin: 8px 0; font-size: 12px; color: rgba(230, 240, 248, 0.4); }
 
 .recipes { display: grid; gap: 4px; }
+/* A whole number of rows, so the list never ends on a slice of one — which reads as
+ * the panel being broken rather than as there being more below. */
+.recipes { max-height: 232px; overflow-y: auto; }
+@media (hover: none) and (min-width: 760px) { .recipes { max-height: 300px; } }
 .recipe {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: auto minmax(42px, auto) 1fr auto 1fr auto;
   align-items: center;
   gap: 10px;
   padding: 7px 10px;
@@ -366,6 +683,28 @@ html, body {
 }
 .recipe .out { text-align: right; }
 .recipe .arrow { color: rgba(230, 240, 248, 0.3); }
+/* Three by three, filled where the pattern is. The only thing that tells a pickaxe
+ * apart from an axe, since both are three planks and two sticks. */
+.pattern {
+  display: grid;
+  grid-template-columns: repeat(3, 4px);
+  grid-template-rows: repeat(3, 4px);
+  gap: 1px;
+  flex: none;
+}
+.pattern i { background: rgba(230, 240, 248, 0.09); border-radius: 1px; }
+.pattern i.on { background: rgba(230, 240, 248, 0.5); }
+.recipe.ready .pattern i.on { background: var(--gold); }
+/* Shapeless: the arrangement genuinely does not matter, so it says nothing rather
+ * than showing a grid that would be a lie. */
+.pattern.loose { width: 14px; }
+.recipe .verb { color: rgba(230, 240, 248, 0.35); font-size: 10px; letter-spacing: 0.1em; }
+/* You have the ingredients but you are in the wrong place. A different problem from
+ * being short two iron, and it says so rather than just staying grey. */
+.recipe .near { font-size: 10px; color: rgba(230, 240, 248, 0.3); padding-left: 8px; }
+.recipe.wrong-place { border-color: rgba(255, 210, 61, 0.35); color: rgba(230, 240, 248, 0.6); }
+.recipe.wrong-place .near { color: var(--gold); }
+.recipe.ready .verb { color: var(--gold); }
 /* Only a recipe you can actually afford looks like a button. Greying out the rest is
  * the whole of the crafting UI: there is no grid to arrange and nothing to discover. */
 .recipe.ready { color: var(--ink); border-color: rgba(126, 231, 135, 0.4); cursor: pointer; }
@@ -486,10 +825,16 @@ html, body {
   color: rgba(230, 240, 248, 0.35);
 }
 .menu-keys p { margin: 0; }
+.menu-keys .menu-first { color: var(--gold); }
 
 /* The in-world chrome is built up front but has nothing to say until you are in the
  * world. Hidden rather than unmounted so entering is one class change. */
 #app.title .headcount,
+#app.title .hearts,
+#app.title .hunger,
+#app.title .dead,
+#app.title .toast,
+#app.title .hurt-flash,
 #app.title .status,
 #app.title .debug,
 #app.title .hotbar,

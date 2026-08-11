@@ -40,9 +40,22 @@ export class Input {
 
   /** True while the button that digs is down. */
   digging = false;
-  /** Held, for walking, jumping and sprinting. */
+  /** Held, for walking and jumping. */
   jump = false;
-  sprint = false;
+  /** Shift, on a keyboard. See `sprint` for the other way. */
+  private sprintKey = false;
+
+  /**
+   * Running.
+   *
+   * Shift on a keyboard, and on a tablet: PUSH THE STICK ALL THE WAY. There is no
+   * shift key on glass and no room for another button under a thumb that is already
+   * holding three, and "shove it harder to go faster" is a thing people try without
+   * being told — which is worth more than any button would be.
+   */
+  get sprint(): boolean {
+    return this.sprintKey || Math.hypot(this.stick.x, this.stick.y) > 0.92;
+  }
 
   private keys = new Set<string>();
   private on = true;
@@ -50,6 +63,14 @@ export class Input {
 
   /** A jump that happened and ended between two sends. See the note up top. */
   private jumpTapped = false;
+  /**
+   * A trigger pull. The same button that digs, latched on the EDGE.
+   *
+   * Digging is a held thing and firing is not — a gun that went off sixty times a
+   * second while the button was down would empty your pockets in a blink. Both come
+   * off the same press and `main` uses whichever suits what is in your hand.
+   */
+  private fireQueued = false;
   private placeQueued = false;
   private placeHeld = false;
   private placeNextAt = 0;
@@ -83,7 +104,7 @@ export class Input {
       }
       if (e.repeat) return;
       this.keys.add(k);
-      if (k === 'shift') this.sprint = true;
+      if (k === 'shift') this.sprintKey = true;
       if (k >= '1' && k <= '9') this.slotQueued = Number(k) - 1;
       if (k === 'e') this.invQueued = true;
       if (k === '?' || k === '/') this.helpQueued = true;
@@ -93,7 +114,7 @@ export class Input {
       const k = e.key.toLowerCase();
       this.keys.delete(k);
       if (k === ' ' || e.code === 'Space') this.jump = false;
-      if (k === 'shift') this.sprint = false;
+      if (k === 'shift') this.sprintKey = false;
     });
     /*
      * A window that loses focus with keys held would otherwise walk you into a wall
@@ -109,6 +130,7 @@ export class Input {
       if (e.pointerType !== 'mouse') return this.touchDown(e);
       if (e.button === 0) {
         this.digging = true;
+        this.fireQueued = true;
         // Held-drag look, for when pointer lock is refused or the player pressed
         // escape. An unlocked cursor that spins the camera whenever it crosses the
         // window is unusable, so it only turns while a button is down.
@@ -170,10 +192,24 @@ export class Input {
         /* not supported here */
       }
     });
-    // Right-click places a block, so it must not also be the browser's menu.
+    // Right-click places a block, so it must not also be the browser's menu — and on
+    // a tablet the same event is the long-press callout, which would otherwise pop a
+    // "copy / look up" bubble over the world every time somebody held DIG.
     root.addEventListener('contextmenu', (e) => {
       if (this.on) e.preventDefault();
     });
+    /*
+     * iOS decides on its own whether `user-scalable=no` applies, and since iOS 10 it
+     * mostly decides not to. Killing the gesture events is the only thing that
+     * actually stops a two-finger pinch from zooming the whole game, or a double-tap
+     * on the DIG button from zooming into it.
+     */
+    for (const kind of ['gesturestart', 'gesturechange', 'gestureend']) {
+      root.addEventListener(kind, (e) => e.preventDefault());
+      document.addEventListener(kind, (e) => {
+        if (this.on) e.preventDefault();
+      });
+    }
 
     // ---- touch
     //
@@ -198,6 +234,7 @@ export class Input {
     });
     this.button(root, 'dig-btn', 'DIG', () => {
       this.digging = true;
+      this.fireQueued = true;
     }, () => {
       this.digging = false;
     });
@@ -314,6 +351,13 @@ export class Input {
     return want;
   }
 
+  /** Read and clear a pending trigger pull. */
+  takeFire(): boolean {
+    const f = this.fireQueued;
+    this.fireQueued = false;
+    return f;
+  }
+
   takePick(): boolean {
     const p = this.pickQueued;
     this.pickQueued = false;
@@ -362,11 +406,12 @@ export class Input {
   private release(): void {
     this.keys.clear();
     this.jump = false;
-    this.sprint = false;
+    this.sprintKey = false;
     this.digging = false;
     this.dragLook = false;
     this.placeHeld = false;
     this.jumpTapped = false;
+    this.fireQueued = false;
     this.stick = { x: 0, y: 0 };
     this.stickId = -1;
     this.lookId = -1;
